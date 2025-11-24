@@ -1,0 +1,1331 @@
+{% extends 'base.html' %}
+
+{% block title %}Map View - Hydropower Mapping{% endblock %}
+
+{% block extra_css %}
+<!-- Leaflet CSS -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<!-- Leaflet MarkerCluster CSS -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+<!-- Leaflet Draw CSS for spatial filtering -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+<style>
+    /* Map Container - Full screen layout */
+    #map {
+        position: fixed;
+        top: var(--navbar-height);
+        left: 0;
+        right: 0;
+        bottom: 0;
+        width: 100%;
+        height: calc(100vh - var(--navbar-height));
+        z-index: 1;
+    }
+    
+    /* Desktop: Make room for sidebar */
+    @media (min-width: 992px) {
+        #map {
+            left: 320px; /* Width of sidebar */
+            width: calc(100% - 320px);
+        }
+    }
+    
+    /* Filter Sidebar - Fixed positioning */
+    .filter-sidebar {
+        position: fixed;
+        left: 0;
+        top: var(--navbar-height);
+        width: 320px;
+        height: calc(100vh - var(--navbar-height));
+        background: white;
+        border-right: 1px solid #e5e7eb;
+        overflow-y: auto;
+        z-index: 1000;
+        transition: transform 0.3s ease;
+    }
+    
+    /* Mobile: Hide sidebar by default */
+    @media (max-width: 991px) {
+        .filter-sidebar {
+            transform: translateX(-100%);
+        }
+        
+        .filter-sidebar.show {
+            transform: translateX(0);
+            box-shadow: 2px 0 8px rgba(0,0,0,0.15);
+        }
+        
+        #map {
+            left: 0;
+            width: 100%;
+        }
+    }
+    
+    /* Map Controls */
+    .map-controls {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        z-index: 1000;
+        background: white;
+        padding: 10px;
+        border-radius: 8px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    }
+    
+    /* Legend */
+    .map-legend {
+        position: absolute;
+        bottom: 30px;
+        right: 10px;
+        z-index: 1000;
+        background: white;
+        padding: 15px;
+        border-radius: 8px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        max-width: 250px;
+    }
+    
+    .legend-item {
+        display: flex;
+        align-items: center;
+        margin-bottom: 8px;
+    }
+    
+    .legend-color {
+        width: 20px;
+        height: 20px;
+        border-radius: 3px;
+        margin-right: 8px;
+        border: 1px solid #ddd;
+    }
+    
+    /* Custom Popup Styles */
+    .leaflet-popup-content-wrapper {
+        border-radius: 8px;
+    }
+    
+    .popup-header {
+        font-weight: 600;
+        font-size: 1.1rem;
+        margin-bottom: 10px;
+        color: #1f2937;
+    }
+    
+    .popup-row {
+        display: flex;
+        justify-content: space-between;
+        padding: 5px 0;
+        border-bottom: 1px solid #e5e7eb;
+    }
+    
+    .popup-row:last-child {
+        border-bottom: none;
+    }
+    
+    .popup-label {
+        font-weight: 500;
+        color: #6b7280;
+    }
+    
+    .popup-value {
+        font-weight: 600;
+        color: #1f2937;
+    }
+    
+    /* Custom Tooltip Styles */
+    .leaflet-tooltip {
+        background: rgba(0, 0, 0, 0.8);
+        border: none;
+        border-radius: 4px;
+        color: white;
+        font-size: 0.875rem;
+        padding: 4px 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+    
+    .leaflet-tooltip-left::before,
+    .leaflet-tooltip-right::before {
+        border-left-color: rgba(0, 0, 0, 0.8);
+        border-right-color: rgba(0, 0, 0, 0.8);
+    }
+    
+    /* Full-screen map layout - Override base styles */
+    body {
+        overflow: hidden;
+    }
+    
+    main {
+        padding: 0 !important;
+        position: relative;
+    }
+    
+    /* Only override container styles inside main, not in navbar */
+    main .container,
+    main .container-fluid {
+        padding: 0 !important;
+        max-width: 100% !important;
+    }
+    
+    /* Hide footer on map page */
+    body:has(#map) footer {
+        display: none;
+    }
+    
+    /* Mobile adjustments */
+    @media (max-width: 768px) {
+        /* Navbar height is inherited from CSS variable */
+        /* No need to override - CSS variable handles responsive sizing */
+        
+        .map-legend {
+            bottom: 70px;
+            max-width: 200px;
+            font-size: 0.875rem;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Filter Sidebar (from component) -->
+{% include 'components/filter_sidebar.html' %}
+
+<!-- Map Container -->
+<div id="map"></div>
+
+<!-- Map Legend -->
+<div class="map-legend">
+    <h6 class="fw-bold mb-3">
+        <i class="bi bi-info-circle"></i> Legend
+    </h6>
+    
+    <div class="legend-section mb-3">
+        <small class="text-muted fw-semibold d-block mb-2">Site Power Output</small>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #10b981;"></div>
+            <small>Pico (&lt;5 kW)</small>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #3b82f6;"></div>
+            <small>Micro (5-100 kW)</small>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #8b5cf6;"></div>
+            <small>Mini (100 kW - 1 MW)</small>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #f59e0b;"></div>
+            <small>Small (1-10 MW)</small>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #ef4444;"></div>
+            <small>Medium (10-50 MW)</small>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #dc2626;"></div>
+            <small>Large (&gt;50 MW)</small>
+        </div>
+    </div>
+    
+    <div class="legend-section">
+        <small class="text-muted fw-semibold d-block mb-2">Layers</small>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #3b82f6;"></div>
+            <small>Stream Network (Order 1-5)</small>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: rgba(59, 130, 246, 0.1); border: 2px solid #3b82f6;"></div>
+            <small>Watersheds</small>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: rgba(16, 185, 129, 0.2); border: 2px solid #10b981;"></div>
+            <small>Subbasins</small>
+        </div>
+        <div class="legend-item">
+            <i class="bi bi-geo-alt-fill" style="color: #f59e0b; font-size: 18px; margin-right: 8px;"></i>
+            <small>Bridges/POIs</small>
+        </div>
+    </div>
+    
+    <div class="legend-section mt-3">
+        <small class="text-muted fw-semibold d-block mb-2">Infrastructure (Top 5 Sites)</small>
+        <div class="legend-item">
+            <i class="bi bi-water" style="color: #0ea5e9; font-size: 20px; margin-right: 8px;"></i>
+            <small>Water Intake/Weir</small>
+        </div>
+        <div class="legend-item">
+            <i class="bi bi-filter-circle-fill" style="color: #06b6d4; font-size: 18px; margin-right: 8px;"></i>
+            <small>Settling Basin</small>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #059669; border: 2px dashed #059669; width: 30px;"></div>
+            <small>Channel</small>
+        </div>
+        <div class="legend-item">
+            <i class="bi bi-box-fill" style="color: #a855f7; font-size: 18px; margin-right: 8px;"></i>
+            <small>Forebay Tank</small>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #dc2626; width: 30px;"></div>
+            <small>Penstock Pipe</small>
+        </div>
+        <div class="legend-item">
+            <i class="bi bi-lightning-charge-fill" style="color: #f59e0b; font-size: 22px; margin-right: 8px;"></i>
+            <small>Powerhouse</small>
+        </div>
+    </div>
+</div>
+
+<!-- Loading Overlay -->
+<div id="mapLoadingOverlay" class="d-none" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.9); z-index: 9999; display: flex; align-items: center; justify-content: center;">
+    <div class="text-center">
+        <div class="spinner-border text-primary mb-3" style="width: 3rem; height: 3rem;" role="status">
+            <span class="visually-hidden">Loading...</span>
+        </div>
+        <h5>Loading Map Data...</h5>
+        <p class="text-muted">Please wait while we load the layers</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<!-- Leaflet MarkerCluster JS -->
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<!-- Leaflet Draw JS for spatial filtering -->
+<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+<script>
+// Map Configuration
+const MAP_CONFIG = {
+    // Matiao, Pantukan, Davao de Oro, Philippines coordinates
+    // Center of Matiao River Basin area (actual DEM center)
+    center: [7.178256, 126.002943], // [latitude, longitude]
+    zoom: 13,
+    minZoom: 10,
+    maxZoom: 18,
+    
+    // CRS Configuration
+    // Data is stored in EPSG:32651 (UTM Zone 51N)
+    // Display uses EPSG:3857 (Web Mercator) - Leaflet default
+    dataCRS: 'EPSG:32651',
+    displayCRS: 'EPSG:3857',
+    
+    // Base layer URLs
+    baseLayers: {
+        osm: {
+            url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+            name: 'OpenStreetMap'
+        },
+        satellite: {
+            url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+            attribution: 'Tiles &copy; Esri',
+            name: 'Satellite'
+        },
+        topo: {
+            url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+            attribution: 'Map data: &copy; OpenStreetMap contributors, SRTM | Map style: &copy; OpenTopoMap',
+            name: 'Topographic'
+        }
+    }
+};
+
+// Initialize map
+let map;
+let baseLayers = {};
+let overlayLayers = {};
+let markerClusterGroup;
+let drawnItems; // For spatial filtering
+let drawControl; // Leaflet Draw control
+let currentBounds = null; // Current bounding box filter
+let allSiteData = []; // Store all site data for client-side filtering
+
+document.addEventListener('DOMContentLoaded', function() {
+    initializeMap();
+    
+    // Handle filter form submission
+    const filterForm = document.getElementById('filterForm');
+    if (filterForm) {
+        filterForm.addEventListener('submit', function(e) {
+            e.preventDefault(); // Prevent page reload
+            applyFilters();
+        });
+    }
+});
+
+function initializeMap() {
+    // Create map instance
+    map = L.map('map', {
+        center: MAP_CONFIG.center,
+        zoom: MAP_CONFIG.zoom,
+        minZoom: MAP_CONFIG.minZoom,
+        maxZoom: MAP_CONFIG.maxZoom,
+        zoomControl: true
+    });
+    
+    // Add base layers
+    baseLayers['OpenStreetMap'] = L.tileLayer(MAP_CONFIG.baseLayers.osm.url, {
+        attribution: MAP_CONFIG.baseLayers.osm.attribution,
+        maxZoom: 19
+    }).addTo(map);
+    
+    baseLayers['Satellite'] = L.tileLayer(MAP_CONFIG.baseLayers.satellite.url, {
+        attribution: MAP_CONFIG.baseLayers.satellite.attribution,
+        maxZoom: 19
+    });
+    
+    baseLayers['Topographic'] = L.tileLayer(MAP_CONFIG.baseLayers.topo.url, {
+        attribution: MAP_CONFIG.baseLayers.topo.attribution,
+        maxZoom: 17
+    });
+    
+    // Add layer control
+    const layerControl = L.control.layers(baseLayers, {}, {
+        position: 'topright',
+        collapsed: false
+    }).addTo(map);
+    
+    // Store layer control reference for dynamic updates
+    window.layerControl = layerControl;
+    
+    // Initialize marker cluster group
+    markerClusterGroup = L.markerClusterGroup({
+        maxClusterRadius: 50,
+        spiderfyOnMaxZoom: true,
+        showCoverageOnHover: false,
+        zoomToBoundsOnClick: true
+    });
+    // Don't add marker cluster group to map by default - only show infrastructure
+    // map.addLayer(markerClusterGroup);  // Commented out to hide inlet/outlet points
+    overlayLayers['Site Points (Inlet/Outlet)'] = markerClusterGroup;
+    window.layerControl.addOverlay(markerClusterGroup, 'Site Points (Inlet/Outlet)');
+    
+    // Initialize drawing layer for spatial filtering
+    drawnItems = new L.FeatureGroup();
+    map.addLayer(drawnItems);
+    
+    // Configure draw control (only rectangle for bounding box)
+    drawControl = new L.Control.Draw({
+        draw: {
+            rectangle: {
+                shapeOptions: {
+                    color: '#3b82f6',
+                    weight: 2,
+                    fillOpacity: 0.1
+                }
+            },
+            polygon: false,
+            polyline: false,
+            circle: false,
+            marker: false,
+            circlemarker: false
+        },
+        edit: {
+            featureGroup: drawnItems,
+            remove: false
+        }
+    });
+    // Don't add draw control to map by default - controlled by button
+    
+    // Handle draw created event
+    map.on(L.Draw.Event.CREATED, function(event) {
+        const layer = event.layer;
+        drawnItems.clearLayers();
+        drawnItems.addLayer(layer);
+        
+        // Get bounding box
+        const bounds = layer.getBounds();
+        currentBounds = bounds;
+        
+        // Enable clear button
+        const clearBtn = document.getElementById('clearBoundingBox');
+        if (clearBtn) clearBtn.disabled = false;
+        
+        // Apply spatial filter
+        applyFilters();
+        
+        // Remove draw control after drawing
+        if (drawControl) map.removeControl(drawControl);
+        
+        showToast('Bounding box applied', 'success');
+    });
+    
+    // Add scale control
+    L.control.scale({
+        position: 'bottomleft',
+        imperial: false,
+        metric: true
+    }).addTo(map);
+    
+    // Load initial data
+    loadMapData();
+    
+    // Map event listeners
+    map.on('zoomend', function() {
+        console.log('Current zoom level:', map.getZoom());
+    });
+    
+    map.on('moveend', function() {
+        const center = map.getCenter();
+        console.log('Map center:', center.lat.toFixed(4), center.lng.toFixed(4));
+    });
+    
+    console.log('Map initialized successfully');
+    console.log('Center:', MAP_CONFIG.center);
+    console.log('Zoom:', MAP_CONFIG.zoom);
+    console.log('Data CRS:', MAP_CONFIG.dataCRS, '→ Display CRS:', MAP_CONFIG.displayCRS);
+}
+
+function loadMapData() {
+    // Show loading overlay
+    const loadingOverlay = document.getElementById('mapLoadingOverlay');
+    if (loadingOverlay) {
+        loadingOverlay.classList.remove('d-none');
+    }
+    
+    // Load all data layers in parallel
+    Promise.all([
+        loadSitePairs(),
+        loadStreamNetwork(),
+        loadWatersheds(),
+        loadSubbasins(),
+        loadBridges()
+    ]).then(() => {
+        if (loadingOverlay) {
+            loadingOverlay.classList.add('d-none');
+        }
+        showToast('Map layers loaded successfully', 'success');
+        updateResultCount(getSiteCount());
+    }).catch(error => {
+        console.error('Error loading map data:', error);
+        if (loadingOverlay) {
+            loadingOverlay.classList.add('d-none');
+        }
+        showToast('Error loading map layers', 'danger');
+    });
+}
+
+// Load site pairs layer
+function loadSitePairs() {
+    // Load all site pairs with infrastructure for client-side filtering
+    return fetch('{% url "hydropower:geojson_site_pairs" %}')
+        .then(response => response.json())
+        .then(geojson => {
+            // Separate site pairs from infrastructure components
+            const sitePairs = geojson.features.filter(f => f.geometry.type === 'LineString' && !f.properties.type);
+            const infrastructureComponents = geojson.features.filter(f => f.properties.type);
+            
+            // Store all site data for client-side filtering
+            allSiteData = sitePairs;
+            
+            // Render sites and infrastructure
+            renderSitePairs({type: 'FeatureCollection', features: sitePairs});
+            renderInfrastructure({type: 'FeatureCollection', features: infrastructureComponents});
+            
+            console.log(`Loaded ${sitePairs.length} site pairs`);
+            console.log(`Loaded ${infrastructureComponents.length} infrastructure components`);
+            
+            if (geojson.metadata) {
+                console.log('Metadata:', geojson.metadata);
+            }
+            
+            return sitePairs.length;
+        })
+        .catch(error => {
+            console.error('Error loading site pairs:', error);
+            return 0;
+        });
+}
+
+// Render site pairs (separated for client-side filtering)
+function renderSitePairs(geojson) {
+    // Remove existing layers
+    if (overlayLayers['Site Pairs (Lines)']) {
+        map.removeLayer(overlayLayers['Site Pairs (Lines)']);
+    }
+    markerClusterGroup.clearLayers();
+    
+    // Create layer for site pair lines
+    const sitePairLines = L.geoJSON(geojson, {
+        style: function(feature) {
+            const power = feature.properties.power || 0;
+            return {
+                color: getPowerColor(power),
+                weight: 2,
+                opacity: 0.7
+            };
+        },
+        onEachFeature: function(feature, layer) {
+            // Add popup
+            const props = feature.properties;
+            const popupContent = createSitePopup(props);
+            layer.bindPopup(popupContent);
+            
+            // Add tooltip on hover (shows site ID and power)
+            const tooltipContent = `<strong>Site ${props.pair_id}</strong><br>Power: ${props.power ? props.power.toFixed(1) + ' kW' : 'N/A'}`;
+            layer.bindTooltip(tooltipContent, {
+                permanent: false,
+                direction: 'top',
+                className: 'custom-tooltip'
+            });
+        }
+    });
+    
+    overlayLayers['Site Pairs (Lines)'] = sitePairLines;
+    // Don't add site pairs to map by default - only show infrastructure
+    // sitePairLines.addTo(map);  // Commented out to hide inlet-outlet lines
+    
+    // Create markers for inlet/outlet points with detailed popups (also hidden by default)
+    /* Commented out to hide inlet/outlet markers
+    geojson.features.forEach(feature => {
+        const props = feature.properties;
+        const power = props.power || 0;
+        const color = getPowerColor(power);
+        
+        // Create detailed popup content
+        const popupContent = createSitePopup(props);
+        
+        // Inlet marker
+        const inletMarker = L.circleMarker([props.inlet_lat, props.inlet_lng], {
+            radius: 6,
+            fillColor: color,
+            color: '#fff',
+            weight: 2,
+            opacity: 1,
+            fillOpacity: 0.8
+        })
+        .bindPopup(popupContent)
+        .bindTooltip(`Inlet ${props.pair_id}`, {
+            permanent: false,
+            direction: 'top'
+        });
+        
+        // Outlet marker
+        const outletMarker = L.circleMarker([props.outlet_lat, props.outlet_lng], {
+            radius: 6,
+            fillColor: color,
+            color: '#000',
+            weight: 2,
+            opacity: 1,
+            fillOpacity: 0.6
+        })
+        .bindPopup(popupContent)
+        .bindTooltip(`Outlet ${props.pair_id}`, {
+            permanent: false,
+            direction: 'top'
+        });
+        
+        markerClusterGroup.addLayer(inletMarker);
+        markerClusterGroup.addLayer(outletMarker);
+    });
+    */ // End of commented out inlet/outlet markers section
+}
+
+// Create popup content for site pairs
+function createSitePopup(props) {
+    return `
+        <div class="popup-content">
+            <div class="popup-header">Site ${props.pair_id}</div>
+            <div class="popup-row">
+                <span class="popup-label">Head:</span>
+                <span class="popup-value">${props.head} m</span>
+            </div>
+            <div class="popup-row">
+                <span class="popup-label">Discharge:</span>
+                <span class="popup-value">${props.discharge || 'N/A'} m³/s</span>
+            </div>
+            <div class="popup-row">
+                <span class="popup-label">Power:</span>
+                <span class="popup-value">${props.power || 'N/A'} kW</span>
+            </div>
+            <div class="popup-row">
+                <span class="popup-label">River Distance:</span>
+                <span class="popup-value">${props.river_distance} m</span>
+            </div>
+            ${props.score ? `<div class="popup-row"><span class="popup-label">Score:</span><span class="popup-value">${props.score}</span></div>` : ''}
+            ${props.rank ? `<div class="popup-row"><span class="popup-label">Rank:</span><span class="popup-value">#${props.rank}</span></div>` : ''}
+            <div class="popup-row">
+                <span class="popup-label">Inlet:</span>
+                <span class="popup-value">${props.inlet_lat}°, ${props.inlet_lng}° (${props.inlet_elevation} m)</span>
+            </div>
+            <div class="popup-row">
+                <span class="popup-label">Outlet:</span>
+                <span class="popup-value">${props.outlet_lat}°, ${props.outlet_lng}° (${props.outlet_elevation} m)</span>
+            </div>
+            ${props.return_period ? `<div class="popup-row"><span class="popup-label">Scenario:</span><span class="popup-value">${props.return_period}</span></div>` : ''}
+        </div>
+    `;
+}
+
+// Render infrastructure components (intake, channel, penstock, powerhouse)
+function renderInfrastructure(geojson) {
+    // Remove existing infrastructure layer if it exists
+    if (overlayLayers['Infrastructure']) {
+        map.removeLayer(overlayLayers['Infrastructure']);
+    }
+    
+    // Define custom icons for each infrastructure type
+    const icons = {
+        intake_basin: L.divIcon({
+            className: 'infrastructure-icon intake-icon',
+            html: '<i class="bi bi-water" style="font-size: 22px; color: #0ea5e9;"></i>', // Water/dam icon in sky blue
+            iconSize: [26, 26],
+            iconAnchor: [13, 13]
+        }),
+        settling_basin: L.divIcon({
+            className: 'infrastructure-icon settling-icon',
+            html: '<i class="bi bi-filter-circle-fill" style="font-size: 20px; color: #06b6d4;"></i>', // Filter icon in cyan
+            iconSize: [24, 24],
+            iconAnchor: [12, 12]
+        }),
+        forebay_tank: L.divIcon({
+            className: 'infrastructure-icon forebay-icon',
+            html: '<i class="bi bi-box-fill" style="font-size: 20px; color: #a855f7;"></i>', // Tank/box icon in purple
+            iconSize: [24, 24],
+            iconAnchor: [12, 12]
+        }),
+        powerhouse: L.divIcon({
+            className: 'infrastructure-icon powerhouse-icon',
+            html: '<i class="bi bi-lightning-charge-fill" style="font-size: 24px; color: #f59e0b;"></i>', // Lightning bolt in amber
+            iconSize: [28, 28],
+            iconAnchor: [14, 14]
+        })
+    };
+    
+    // Create infrastructure layer with different styles per type
+    const infrastructureLayer = L.geoJSON(geojson, {
+        pointToLayer: function(feature, latlng) {
+            // Only create custom markers for Point geometries
+            if (feature.geometry.type === 'Point') {
+                const type = feature.properties.type;
+                const icon = icons[type] || L.marker(latlng).options.icon;
+                return L.marker(latlng, { icon: icon });
+            }
+            // For non-Point geometries, return null to let Leaflet handle them
+            return null;
+        },
+        style: function(feature) {
+            const type = feature.properties.type;
+            
+            // Styles for LineString features (channel and penstock)
+            if (feature.geometry.type === 'LineString') {
+                if (type === 'channel') {
+                    return {
+                        color: '#059669',  // Emerald green for open channel
+                        weight: 4,
+                        opacity: 0.85,
+                        dashArray: '8, 4'  // Dashed line for open channel
+                    };
+                } else if (type === 'penstock') {
+                    return {
+                        color: '#dc2626',  // Red for high-pressure penstock
+                        weight: 5,
+                        opacity: 0.9
+                    };
+                } else if (type === 'intake_to_settling') {
+                    // Small connector line between intake and settling basin
+                    return {
+                        color: '#0ea5e9', // Sky blue connector
+                        weight: 3,
+                        opacity: 0.8,
+                        dashArray: '4, 4'
+                    };
+                }
+            }
+            
+            return {};
+        },
+        onEachFeature: function(feature, layer) {
+            const props = feature.properties;
+            const type = props.type;
+            
+            // Create popup based on infrastructure type
+            let popupContent = `<div class="popup-content">`;
+            
+            if (type === 'intake_basin') {
+                const coords = feature.geometry.coordinates;
+                popupContent += `
+                    <div class="popup-header"><i class="bi bi-water"></i> Water Intake/Weir</div>
+                    <div class="popup-row"><span class="popup-label">Site:</span><span class="popup-value">${props.pair_id}</span></div>
+                    <div class="popup-row"><span class="popup-label">Rank:</span><span class="popup-value">#${props.rank}</span></div>
+                    <div class="popup-row"><span class="popup-label">Coordinates:</span><span class="popup-value">${coords[1].toFixed(6)}, ${coords[0].toFixed(6)}</span></div>
+                    <p class="mb-0"><small>Diverts water from river into system</small></p>
+                `;
+            } else if (type === 'settling_basin') {
+                const coords = feature.geometry.coordinates;
+                popupContent += `
+                    <div class="popup-header"><i class="bi bi-filter-circle-fill"></i> Settling Basin</div>
+                    <div class="popup-row"><span class="popup-label">Site:</span><span class="popup-value">${props.pair_id}</span></div>
+                    <div class="popup-row"><span class="popup-label">Elevation:</span><span class="popup-value">${props.elevation_m ? props.elevation_m.toFixed(2) + ' m' : 'N/A'}</span></div>
+                    <div class="popup-row"><span class="popup-label">Coordinates:</span><span class="popup-value">${coords[1].toFixed(6)}, ${coords[0].toFixed(6)}</span></div>
+                    <div class="popup-row"><span class="popup-label">Rank:</span><span class="popup-value">#${props.rank}</span></div>
+                    <p class="mb-0"><small>Removes sediment and debris</small></p>
+                `;
+            } else if (type === 'channel') {
+                const coords = feature.geometry.coordinates;
+                const startCoord = coords[0];
+                const endCoord = coords[coords.length - 1];
+                popupContent += `
+                    <div class="popup-header"><i class="bi bi-arrows-angle-contract"></i> Conveyance Channel</div>
+                    <div class="popup-row"><span class="popup-label">Site:</span><span class="popup-value">${props.pair_id}</span></div>
+                    <div class="popup-row"><span class="popup-label">Length:</span><span class="popup-value">${props.length_m ? props.length_m.toFixed(0) + ' m' : 'N/A'}</span></div>
+                    <div class="popup-row"><span class="popup-label">Start:</span><span class="popup-value">${startCoord[1].toFixed(6)}, ${startCoord[0].toFixed(6)}</span></div>
+                    <div class="popup-row"><span class="popup-label">End:</span><span class="popup-value">${endCoord[1].toFixed(6)}, ${endCoord[0].toFixed(6)}</span></div>
+                    <div class="popup-row"><span class="popup-label">Rank:</span><span class="popup-value">#${props.rank}</span></div>
+                    <p class="mb-0"><small>Open channel transports water to forebay</small></p>
+                `;
+            } else if (type === 'forebay_tank') {
+                const coords = feature.geometry.coordinates;
+                popupContent += `
+                    <div class="popup-header"><i class="bi bi-box-fill"></i> Forebay Tank</div>
+                    <div class="popup-row"><span class="popup-label">Site:</span><span class="popup-value">${props.pair_id}</span></div>
+                    <div class="popup-row"><span class="popup-label">Elevation:</span><span class="popup-value">${props.elevation_m ? props.elevation_m.toFixed(2) + ' m' : 'N/A'}</span></div>
+                    <div class="popup-row"><span class="popup-label">Coordinates:</span><span class="popup-value">${coords[1].toFixed(6)}, ${coords[0].toFixed(6)}</span></div>
+                    <div class="popup-row"><span class="popup-label">Rank:</span><span class="popup-value">#${props.rank}</span></div>
+                    <p class="mb-0"><small>Surge tank before penstock inlet</small></p>
+                `;
+            } else if (type === 'penstock') {
+                const coords = feature.geometry.coordinates;
+                const startCoord = coords[0];
+                const endCoord = coords[coords.length - 1];
+                popupContent += `
+                    <div class="popup-header"><i class="bi bi-arrow-down-circle"></i> Penstock Pipe</div>
+                    <div class="popup-row"><span class="popup-label">Site:</span><span class="popup-value">${props.pair_id}</span></div>
+                    <div class="popup-row"><span class="popup-label">Length:</span><span class="popup-value">${props.length_m ? props.length_m.toFixed(0) + ' m' : 'N/A'}</span></div>
+                    <div class="popup-row"><span class="popup-label">Diameter:</span><span class="popup-value">${props.diameter_m ? props.diameter_m.toFixed(2) + ' m' : 'N/A'}</span></div>
+                    <div class="popup-row"><span class="popup-label">Start:</span><span class="popup-value">${startCoord[1].toFixed(6)}, ${startCoord[0].toFixed(6)}</span></div>
+                    <div class="popup-row"><span class="popup-label">End:</span><span class="popup-value">${endCoord[1].toFixed(6)}, ${endCoord[0].toFixed(6)}</span></div>
+                    <div class="popup-row"><span class="popup-label">Rank:</span><span class="popup-value">#${props.rank}</span></div>
+                    <p class="mb-0"><small>Pressure pipe delivers water to turbine</small></p>
+                `;
+            } else if (type === 'intake_to_settling') {
+                popupContent += `
+                    <div class="popup-header"><i class="bi bi-arrow-right-short"></i> Intake → Settling</div>
+                    <div class="popup-row"><span class="popup-label">Site:</span><span class="popup-value">${props.pair_id}</span></div>
+                    <div class="popup-row"><span class="popup-label">Rank:</span><span class="popup-value">#${props.rank}</span></div>
+                    <p class="mb-0"><small>Connector from intake weir to settling basin</small></p>
+                `;
+            } else if (type === 'powerhouse') {
+                const coords = feature.geometry.coordinates;
+                popupContent += `
+                    <div class="popup-header"><i class="bi bi-lightning-charge-fill"></i> Powerhouse</div>
+                    <div class="popup-row"><span class="popup-label">Site:</span><span class="popup-value">${props.pair_id}</span></div>
+                    <div class="popup-row"><span class="popup-label">Elevation:</span><span class="popup-value">${props.elevation_m ? props.elevation_m.toFixed(2) + ' m' : 'N/A'}</span></div>
+                    <div class="popup-row"><span class="popup-label">Coordinates:</span><span class="popup-value">${coords[1].toFixed(6)}, ${coords[0].toFixed(6)}</span></div>
+                    <div class="popup-row"><span class="popup-label">Power Output:</span><span class="popup-value">${props.power_kw ? props.power_kw.toFixed(1) + ' kW' : 'N/A'}</span></div>
+                    <div class="popup-row"><span class="popup-label">Rank:</span><span class="popup-value">#${props.rank}</span></div>
+                    <p class="mb-0"><small>Houses turbine, generator, and control systems</small></p>
+                `;
+            }
+            
+            popupContent += '</div>';
+            layer.bindPopup(popupContent);
+            
+            // Add tooltip
+            const tooltipLabels = {
+                'intake_basin': 'Water Intake',
+                'settling_basin': 'Settling Basin',
+                'channel': 'Channel',
+                'forebay_tank': 'Forebay Tank',
+                'penstock': 'Penstock',
+                'powerhouse': 'Powerhouse'
+            };
+            tooltipLabels['intake_to_settling'] = 'Intake → Settling';
+            layer.bindTooltip(tooltipLabels[type] || type, {
+                permanent: false,
+                direction: 'top'
+            });
+        }
+    });
+    
+    overlayLayers['Infrastructure'] = infrastructureLayer;
+    infrastructureLayer.addTo(map);
+    window.layerControl.addOverlay(infrastructureLayer, 'Infrastructure (Top 5 Sites)');
+    
+    console.log(`Rendered infrastructure layer with ${geojson.features.length} components`);
+}
+
+// Load stream network layer
+function loadStreamNetwork() {
+    return fetch('{% url "hydropower:geojson_streams" %}')
+        .then(response => response.json())
+        .then(geojson => {
+            const streamLayer = L.geoJSON(geojson, {
+                style: function(feature) {
+                    const order = feature.properties.stream_order;
+                    // Color and width based on stream order
+                    const colors = ['#93c5fd', '#60a5fa', '#3b82f6', '#2563eb', '#1e40af'];
+                    const widths = [1, 1.5, 2, 2.5, 3];
+                    
+                    return {
+                        color: colors[Math.min(order - 1, colors.length - 1)],
+                        weight: widths[Math.min(order - 1, widths.length - 1)],
+                        opacity: 0.7
+                    };
+                },
+                onEachFeature: function(feature, layer) {
+                    const props = feature.properties;
+                    const popupContent = `
+                        <div class="popup-content">
+                            <div class="popup-header">Stream Segment</div>
+                            <div class="popup-row">
+                                <span class="popup-label">Order:</span>
+                                <span class="popup-value">${props.stream_order}</span>
+                            </div>
+                            <div class="popup-row">
+                                <span class="popup-label">Length:</span>
+                                <span class="popup-value">${props.length_m} m</span>
+                            </div>
+                            <div class="popup-row">
+                                <span class="popup-label">Type:</span>
+                                <span class="popup-value">${props.is_outlet ? 'Outlet' : (props.is_confluence ? 'Confluence' : 'Regular')}</span>
+                            </div>
+                        </div>
+                    `;
+                    layer.bindPopup(popupContent);
+                    
+                    // Add tooltip on hover
+                    layer.bindTooltip(`Order ${props.stream_order}`, {
+                        permanent: false,
+                        direction: 'top'
+                    });
+                }
+            });
+            
+            overlayLayers['Stream Network'] = streamLayer;
+            streamLayer.addTo(map);
+            window.layerControl.addOverlay(streamLayer, 'Stream Network');
+            
+            // Implement layer generalization - hide low-order streams at low zoom
+            map.on('zoomend', function() {
+                updateStreamVisibility();
+            });
+            updateStreamVisibility(); // Initial call
+            
+            console.log(`Loaded ${geojson.features.length} stream segments`);
+            return geojson.features.length;
+        })
+        .catch(error => {
+            console.error('Error loading stream network:', error);
+            return 0;
+        });
+}
+
+// Update stream visibility based on zoom level (layer generalization)
+function updateStreamVisibility() {
+    const zoom = map.getZoom();
+    const streamLayer = overlayLayers['Stream Network'];
+    
+    if (streamLayer) {
+        streamLayer.eachLayer(function(layer) {
+            const order = layer.feature.properties.stream_order;
+            
+            // Show only higher-order streams at low zoom levels
+            if (zoom < 12) {
+                // Zoom < 12: Show only order 4-5
+                layer.setStyle({ opacity: order >= 4 ? 0.7 : 0 });
+            } else if (zoom < 14) {
+                // Zoom 12-13: Show order 3-5
+                layer.setStyle({ opacity: order >= 3 ? 0.7 : 0 });
+            } else {
+                // Zoom >= 14: Show all streams
+                layer.setStyle({ opacity: 0.7 });
+            }
+        });
+    }
+}
+
+// Load watersheds layer
+function loadWatersheds() {
+    return fetch('{% url "hydropower:geojson_watersheds" %}')
+        .then(response => response.json())
+        .then(geojson => {
+            const watershedLayer = L.geoJSON(geojson, {
+                style: {
+                    color: '#3b82f6',
+                    weight: 2,
+                    opacity: 0.8,
+                    fillColor: '#3b82f6',
+                    fillOpacity: 0.1
+                },
+                onEachFeature: function(feature, layer) {
+                    const props = feature.properties;
+                    const popupContent = `
+                        <div class="popup-content">
+                            <div class="popup-header">Watershed ${props.watershed_id}</div>
+                            <div class="popup-row">
+                                <span class="popup-label">Area:</span>
+                                <span class="popup-value">${props.area_km2} km²</span>
+                            </div>
+                            <div class="popup-row">
+                                <span class="popup-label">Perimeter:</span>
+                                <span class="popup-value">${props.perimeter_m} m</span>
+                            </div>
+                            ${props.stream_length_m ? `<div class="popup-row"><span class="popup-label">Stream Length:</span><span class="popup-value">${props.stream_length_m} m</span></div>` : ''}
+                        </div>
+                    `;
+                    layer.bindPopup(popupContent);
+                }
+            });
+            
+            overlayLayers['Watersheds'] = watershedLayer;
+            watershedLayer.addTo(map);
+            window.layerControl.addOverlay(watershedLayer, 'Watersheds');
+            
+            console.log(`Loaded ${geojson.features.length} watersheds`);
+            return geojson.features.length;
+        })
+        .catch(error => {
+            console.error('Error loading watersheds:', error);
+            return 0;
+        });
+}
+
+// Load subbasins layer
+function loadSubbasins() {
+    return fetch('{% url "hydropower:geojson_subbasins" %}')
+        .then(response => response.json())
+        .then(geojson => {
+            const subbasinLayer = L.geoJSON(geojson, {
+                style: {
+                    color: '#10b981',
+                    weight: 2,
+                    opacity: 0.8,
+                    fillColor: '#10b981',
+                    fillOpacity: 0.2
+                },
+                onEachFeature: function(feature, layer) {
+                    const props = feature.properties;
+                    let popupContent = `<div class="popup-content"><div class="popup-header">Subbasin</div>`;
+                    
+                    // Add all properties dynamically
+                    for (const [key, value] of Object.entries(props)) {
+                        if (key !== 'dataset_id' && key !== 'dataset_name' && value !== null) {
+                            popupContent += `<div class="popup-row"><span class="popup-label">${key}:</span><span class="popup-value">${value}</span></div>`;
+                        }
+                    }
+                    popupContent += '</div>';
+                    
+                    layer.bindPopup(popupContent);
+                }
+            });
+            
+            overlayLayers['Subbasins'] = subbasinLayer;
+            subbasinLayer.addTo(map);
+            window.layerControl.addOverlay(subbasinLayer, 'Subbasins');
+            
+            console.log(`Loaded ${geojson.features.length} subbasins`);
+            return geojson.features.length;
+        })
+        .catch(error => {
+            console.error('Error loading subbasins:', error);
+            return 0;
+        });
+}
+
+// Load bridges/POIs layer
+function loadBridges() {
+    return fetch('{% url "hydropower:geojson_bridges" %}')
+        .then(response => response.json())
+        .then(geojson => {
+            const bridgeLayer = L.geoJSON(geojson, {
+                pointToLayer: function(feature, latlng) {
+                    return L.marker(latlng, {
+                        icon: L.divIcon({
+                            className: 'custom-bridge-icon',
+                            html: '<i class="bi bi-geo-alt-fill" style="font-size: 24px; color: #f59e0b;"></i>',
+                            iconSize: [24, 24],
+                            iconAnchor: [12, 24]
+                        })
+                    });
+                },
+                onEachFeature: function(feature, layer) {
+                    const props = feature.properties;
+                    let popupContent = `<div class="popup-content"><div class="popup-header">Bridge/POI</div>`;
+                    
+                    for (const [key, value] of Object.entries(props)) {
+                        if (key !== 'dataset_id' && key !== 'dataset_name' && value !== null) {
+                            popupContent += `<div class="popup-row"><span class="popup-label">${key}:</span><span class="popup-value">${value}</span></div>`;
+                        }
+                    }
+                    popupContent += '</div>';
+                    
+                    layer.bindPopup(popupContent);
+                }
+            });
+            
+            overlayLayers['Bridges/POIs'] = bridgeLayer;
+            bridgeLayer.addTo(map);
+            window.layerControl.addOverlay(bridgeLayer, 'Bridges/POIs');
+            
+            console.log(`Loaded ${geojson.features.length} bridges/POIs`);
+            return geojson.features.length;
+        })
+        .catch(error => {
+            console.error('Error loading bridges:', error);
+            return 0;
+        });
+}
+
+// Layer toggle function (called from filter sidebar)
+function toggleMapLayer(layerName, visible) {
+    console.log('Toggle layer:', layerName, visible);
+    
+    const layerMap = {
+        'sites': 'Site Pairs (Lines)',
+        'streams': 'Stream Network',
+        'watersheds': 'Watersheds',
+        'subbasins': 'Subbasins',
+        'bridges': 'Bridges/POIs'
+    };
+    
+    const actualLayerName = layerMap[layerName];
+    const layer = overlayLayers[actualLayerName];
+    
+    if (layer) {
+        if (visible) {
+            map.addLayer(layer);
+        } else {
+            map.removeLayer(layer);
+        }
+    }
+    
+    // Toggle marker cluster for site points
+    if (layerName === 'sites') {
+        if (visible) {
+            map.addLayer(markerClusterGroup);
+        } else {
+            map.removeLayer(markerClusterGroup);
+        }
+    }
+}
+
+// Filter application function (called from filter sidebar)
+function applyFilters() {
+    const formData = new FormData(document.getElementById('filterForm'));
+    const filters = {
+        min_head: parseFloat(formData.get('min_head')) || 0,
+        max_head: parseFloat(formData.get('max_head')) || 2000,
+        flow_rate: parseFloat(formData.get('flow_rate')) || 0,
+        scenario: formData.get('scenario'),
+        classifications: formData.getAll('classification[]')
+    };
+    
+    console.log('Applying filters:', filters);
+    
+    // Client-side filtering for fast updates (when data is already loaded)
+    // Increased threshold to 5000 to support classification filtering (requires client-side power calculation)
+    if (allSiteData && allSiteData.length > 0 && allSiteData.length < 5000) {
+        // Use client-side filtering for datasets < 5000 features
+        const filtered = allSiteData.filter(feature => {
+            const props = feature.properties;
+            
+            // Apply head range filter
+            if (props.head < filters.min_head) return false;
+            if (props.head > filters.max_head) return false;
+            
+            // Apply flow rate filter
+            if (filters.flow_rate > 0 && (!props.discharge || props.discharge < filters.flow_rate)) return false;
+            
+            // Apply scenario filter
+            if (filters.scenario && props.return_period !== filters.scenario) return false;
+            
+            // Apply power classification filter
+            if (filters.classifications.length > 0) {
+                const head = props.head || 0;
+                const discharge = props.discharge || 0;
+                const classification = getPowerClassification(head, discharge);
+                if (!filters.classifications.includes(classification)) return false;
+            }
+            
+            // Apply spatial extent filter
+            if (currentBounds) {
+                const inletPoint = L.latLng(props.inlet_lat, props.inlet_lng);
+                const outletPoint = L.latLng(props.outlet_lat, props.outlet_lng);
+                if (!currentBounds.contains(inletPoint) && !currentBounds.contains(outletPoint)) {
+                    return false;
+                }
+            }
+            
+            return true;
+        });
+        
+        // Render filtered data
+        const filteredGeoJSON = {
+            type: 'FeatureCollection',
+            features: filtered
+        };
+        renderSitePairs(filteredGeoJSON);
+        updateResultCount(filtered.length);
+        showToast(`Client-side filter: ${filtered.length} sites found`, 'success');
+        
+    } else {
+        // Use server-side filtering for large datasets
+        const params = new URLSearchParams();
+        if (filters.min_head) params.append('min_head', filters.min_head);
+        if (filters.max_head && filters.max_head < 2000) params.append('max_head', filters.max_head);
+        if (filters.flow_rate) params.append('flow_rate', filters.flow_rate);
+        if (filters.scenario) params.append('scenario', filters.scenario);
+        
+        // Add spatial extent to server request if available
+        if (currentBounds) {
+            const sw = currentBounds.getSouthWest();
+            const ne = currentBounds.getNorthEast();
+            params.append('bbox', `${sw.lng},${sw.lat},${ne.lng},${ne.lat}`);
+        }
+        
+        // Reload site pairs with filters
+        fetch(`{% url "hydropower:geojson_site_pairs" %}?${params.toString()}`)
+            .then(response => response.json())
+            .then(geojson => {
+                allSiteData = geojson.features;
+                renderSitePairs(geojson);
+                updateResultCount(geojson.features.length);
+                showToast(`Server-side filter: ${geojson.features.length} sites found`, 'success');
+            })
+            .catch(error => {
+                console.error('Error applying filters:', error);
+                showToast('Error applying filters', 'danger');
+            });
+    }
+}
+
+// Get power classification based on power output
+function getPowerClassification(head, discharge) {
+    // Calculate power: P = ρ × g × Q × H × η
+    // ρ = 1000 kg/m³, g = 9.81 m/s², η = 0.7
+    const power = 1000 * 9.81 * discharge * head * 0.7 / 1000; // in kW
+    
+    // Classify based on power output
+    if (power < 5) return 'pico';          // <5 kW
+    if (power < 100) return 'micro';       // 5-100 kW
+    if (power < 1000) return 'mini';       // 100 kW - 1 MW
+    if (power < 10000) return 'small';     // 1-10 MW
+    if (power < 50000) return 'medium';    // 10-50 MW
+    return 'large';                         // >50 MW
+}
+
+// Get site count
+function getSiteCount() {
+    if (overlayLayers['Site Pairs (Lines)']) {
+        const layer = overlayLayers['Site Pairs (Lines)'];
+        let count = 0;
+        layer.eachLayer(() => count++);
+        return count;
+    }
+    return 0;
+}
+
+// Update result count in filter sidebar
+function updateResultCount(count) {
+    const resultCountElement = document.getElementById('resultCount');
+    if (resultCountElement) {
+        resultCountElement.textContent = count.toLocaleString();
+    }
+}
+
+// Get marker color based on power output
+function getPowerColor(power) {
+    // Power is in kW - matches classification thresholds
+    if (power < 5) return '#10b981';      // Green - Pico (<5 kW)
+    if (power < 100) return '#3b82f6';    // Blue - Micro (5-100 kW)
+    if (power < 1000) return '#8b5cf6';   // Purple - Mini (100 kW - 1 MW)
+    if (power < 10000) return '#f59e0b';  // Orange - Small (1-10 MW)
+    if (power < 50000) return '#ef4444'; // Red - Medium (10-50 MW)
+    return '#dc2626';                      // Dark Red - Large (>50 MW)
+}
+
+// Show toast notification
+function showToast(message, type = 'info') {
+    // Use Bootstrap toast or simple alert
+    console.log(`[${type.toUpperCase()}] ${message}`);
+    
+    // If Bootstrap toast is available, use it
+    // Otherwise, this is just for logging
+}
+
+// CRS Transformation Helper (if needed for manual transformations)
+// Note: Leaflet handles EPSG:3857 automatically
+// For EPSG:32651 → EPSG:3857, use proj4js or server-side transformation
+function transformCoordinates(coords, fromCRS, toCRS) {
+    // Placeholder for CRS transformation
+    // In practice, GeoJSON from PostGIS will already be in EPSG:4326 (lat/lng)
+    // which Leaflet converts to EPSG:3857 automatically
+    return coords;
+}
+
+// ===== NEW FUNCTIONS FOR ENHANCEMENTS =====
+
+// Update layer opacity
+function updateLayerOpacity(layerName, opacity) {
+    console.log('Update opacity:', layerName, opacity);
+    
+    const layerMap = {
+        'sites': 'Site Pairs (Lines)',
+        'streams': 'Stream Network',
+        'watersheds': 'Watersheds',
+        'subbasins': 'Subbasins',
+        'bridges': 'Bridges/POIs'
+    };
+    
+    const actualLayerName = layerMap[layerName];
+    const layer = overlayLayers[actualLayerName];
+    
+    if (layer) {
+        layer.eachLayer(function(sublayer) {
+            if (sublayer.setStyle) {
+                const currentStyle = sublayer.options;
+                sublayer.setStyle({
+                    opacity: opacity,
+                    fillOpacity: currentStyle.fillOpacity ? opacity * 0.5 : undefined
+                });
+            }
+        });
+    }
+    
+    // Update marker cluster opacity
+    if (layerName === 'sites' && markerClusterGroup) {
+        markerClusterGroup.eachLayer(function(marker) {
+            if (marker.setStyle) {
+                marker.setStyle({ opacity: opacity, fillOpacity: opacity * 0.8 });
+            }
+        });
+    }
+}
+
+// Enable bounding box drawing
+function enableBoundingBoxDraw() {
+    // Check if draw control exists and is not already added
+    if (drawControl && !map._controlContainer.contains(drawControl._container)) {
+        map.addControl(drawControl);
+        showToast('Draw a rectangle on the map to filter by area', 'info');
+    }
+    
+    // Start rectangle drawing
+    const rectangleDrawer = new L.Draw.Rectangle(map, drawControl.options.draw.rectangle);
+    rectangleDrawer.enable();
+}
+
+// Clear bounding box
+function clearBoundingBox() {
+    drawnItems.clearLayers();
+    currentBounds = null;
+    
+    // Disable clear button
+    const clearBtn = document.getElementById('clearBoundingBox');
+    if (clearBtn) clearBtn.disabled = true;
+    
+    // Remove draw control if present
+    if (drawControl && map._controlContainer.contains(drawControl._container)) {
+        map.removeControl(drawControl);
+    }
+    
+    // Reapply filters without spatial extent
+    applyFilters();
+    
+    showToast('Bounding box cleared', 'success');
+}
+</script>
+{% endblock %}

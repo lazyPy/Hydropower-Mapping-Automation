@@ -1,0 +1,12 @@
+<!-- Loading Spinner Component -->
+<div class="text-center py-5" id="loadingSpinner-{{ id|default:'default' }}">
+    <div class="spinner-border text-primary" style="width: 3rem; height: 3rem;" role="status">
+        <span class="visually-hidden">Loading...</span>
+    </div>
+    <div class="mt-3">
+        <p class="text-muted mb-0">{{ message|default:"Loading..." }}</p>
+        {% if submessage %}
+            <small class="text-muted">{{ submessage }}</small>
+        {% endif %}
+    </div>
+</div>

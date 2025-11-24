@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>{% block title %}Hydropower Mapping{% endblock %}</title>
+    
+    <!-- Bootstrap 5 CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    
+    <!-- Bootstrap Icons -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.2/font/bootstrap-icons.css" rel="stylesheet">
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    
+    <!-- Leaflet MarkerCluster CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
+    
+    <!-- Custom CSS -->
+    <style>
+        :root {
+            --primary: #3b82f6;
+            --primary-dark: #2563eb;
+            --text-dark: #1f2937;
+            --text-muted: #6b7280;
+            --bg-light: #f9fafb;
+            --border: #e5e7eb;
+            --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+            --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+            --navbar-height: 75px; /* Desktop navbar height */
+        }
+        
+        /* Mobile navbar height adjustment */
+        @media (max-width: 768px) {
+            :root {
+                --navbar-height: 73px; /* Mobile navbar is slightly shorter */
+            }
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: var(--bg-light);
+            color: var(--text-dark);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            line-height: 1.6;
+        }
+        
+        .navbar {
+            background: white;
+            border-bottom: 1px solid var(--border);
+            padding: 1rem 0;
+            box-shadow: var(--shadow);
+            position: relative;
+            z-index: 1050; /* Ensure navbar is above map elements */
+        }
+        
+        .navbar-brand {
+            font-weight: 700;
+            font-size: 1.25rem;
+            color: var(--primary);
+            transition: opacity 0.2s;
+        }
+        
+        .navbar-brand:hover {
+            opacity: 0.8;
+        }
+        
+        .nav-link {
+            color: var(--text-muted);
+            font-weight: 500;
+            padding: 0.5rem 1rem !important;
+            transition: color 0.2s;
+            border-radius: 0.5rem;
+        }
+        
+        .nav-link:hover {
+            color: var(--primary);
+            background: var(--bg-light);
+        }
+        
+        main {
+            flex: 1;
+            padding: 3rem 0;
+        }
+        
+        .card {
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            transition: all 0.3s ease;
+        }
+        
+        .card:hover {
+            box-shadow: var(--shadow-lg);
+            transform: translateY(-2px);
+        }
+        
+        .btn-primary {
+            background: var(--primary);
+            border: none;
+            padding: 0.75rem 1.5rem;
+            font-weight: 600;
+            border-radius: 0.5rem;
+            transition: all 0.2s;
+        }
+        
+        .btn-primary:hover {
+            background: var(--primary-dark);
+            box-shadow: var(--shadow-lg);
+        }
+        
+        .btn-outline-secondary {
+            border: 2px solid var(--border);
+            color: var(--text-dark);
+            padding: 0.75rem 1.5rem;
+            font-weight: 600;
+            border-radius: 0.5rem;
+            transition: all 0.2s;
+        }
+        
+        .btn-outline-secondary:hover {
+            border-color: var(--primary);
+            color: var(--primary);
+            background: transparent;
+        }
+        
+        footer {
+            background: white;
+            border-top: 1px solid var(--border);
+            padding: 2rem 0;
+            margin-top: auto;
+        }
+        
+        h1, h2, h3, h4, h5, h6 {
+            font-weight: 700;
+            color: var(--text-dark);
+        }
+        
+        .text-muted {
+            color: var(--text-muted) !important;
+        }
+        
+        .shadow-sm {
+            box-shadow: var(--shadow) !important;
+        }
+        
+        /* Loading Spinner Overlay */
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.9);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+            backdrop-filter: blur(3px);
+        }
+        
+        .loading-content {
+            text-align: center;
+            padding: 2rem;
+        }
+        
+        .loading-spinner {
+            width: 4rem;
+            height: 4rem;
+            border: 0.4rem solid var(--border);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Progress Bar */
+        .progress-bar {
+            transition: width 0.4s ease;
+        }
+        
+        /* Responsive Filter Sidebar */
+        .filter-sidebar {
+            background: white;
+            border-right: 1px solid var(--border);
+            height: calc(100vh - 72px);
+            overflow-y: auto;
+            transition: transform 0.3s ease;
+        }
+        
+        .filter-sidebar.collapsed {
+            transform: translateX(-100%);
+        }
+        
+        @media (max-width: 992px) {
+            .filter-sidebar {
+                position: fixed;
+                left: 0;
+                top: 72px;
+                width: 280px;
+                z-index: 1000;
+                box-shadow: var(--shadow-lg);
+                transform: translateX(-100%);
+            }
+            
+            .filter-sidebar.show {
+                transform: translateX(0);
+            }
+            
+            .filter-backdrop {
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: rgba(0, 0, 0, 0.5);
+                z-index: 999;
+                display: none;
+            }
+            
+            .filter-backdrop.show {
+                display: block;
+            }
+        }
+        
+        /* Responsive Table */
+        @media (max-width: 768px) {
+            .table-responsive {
+                font-size: 0.875rem;
+            }
+            
+            .btn-group-sm .btn {
+                padding: 0.25rem 0.5rem;
+                font-size: 0.75rem;
+            }
+        }
+        
+        /* Mobile Navbar */
+        @media (max-width: 768px) {
+            main {
+                padding: 2rem 0;
+            }
+            
+            .navbar-brand {
+                font-size: 1rem;
+            }
+            
+            .card {
+                margin-bottom: 1rem;
+            }
+        }
+        
+        /* Mobile Optimizations */
+        @media (max-width: 576px) {
+            .container-fluid {
+                padding-left: 0.5rem;
+                padding-right: 0.5rem;
+            }
+            
+            .card-body {
+                padding: 1rem;
+            }
+        }
+        
+        /* Toast Notifications */
+        .toast-container {
+            position: fixed;
+            top: 80px;
+            right: 1rem;
+            z-index: 9999;
+        }
+        
+        /* Form Enhancements */
+        .form-control:focus,
+        .form-select:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 0.25rem rgba(59, 130, 246, 0.25);
+        }
+        
+        .invalid-feedback {
+            display: block;
+            color: #dc3545;
+            font-size: 0.875rem;
+            margin-top: 0.25rem;
+        }
+    </style>
+    
+    {% block extra_css %}{% endblock %}
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg">
+        <div class="container">
+            <a class="navbar-brand" href="{% url 'hydropower:map_view' %}">
+                <i class="bi bi-map"></i> Hydropower Mapping System
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav ms-auto">
+                    <li class="nav-item">
+                        <a class="nav-link active" href="{% url 'hydropower:map_view' %}">
+                            <i class="bi bi-geo-alt-fill"></i> Map View
+                        </a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Messages -->
+    {% if messages %}
+    <div class="container mt-3">
+        {% for message in messages %}
+        <div class="alert alert-{{ message.tags }} alert-dismissible fade show" role="alert">
+            {{ message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <!-- Main Content -->
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Footer -->
+    <footer>
+        <div class="container text-center text-muted">
+            <small>Hydropower Potential Mapping System &copy; 2025</small>
+        </div>
+    </footer>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <!-- Leaflet MarkerCluster JS -->
+    <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+    
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    
+    <!-- Global JavaScript -->
+    <script>
+        // Loading Overlay Functions
+        function showLoading(message = 'Processing...') {
+            const overlay = document.createElement('div');
+            overlay.className = 'loading-overlay';
+            overlay.id = 'loadingOverlay';
+            overlay.innerHTML = `
+                <div class="loading-content">
+                    <div class="loading-spinner mx-auto mb-3"></div>
+                    <h5 class="text-dark">${message}</h5>
+                    <p class="text-muted">Please wait...</p>
+                </div>
+            `;
+            document.body.appendChild(overlay);
+        }
+        
+        function hideLoading() {
+            const overlay = document.getElementById('loadingOverlay');
+            if (overlay) {
+                overlay.remove();
+            }
+        }
+        
+        // Toast Notification Function
+        function showToast(message, type = 'info') {
+            const toastContainer = document.querySelector('.toast-container') || createToastContainer();
+            const toastId = 'toast-' + Date.now();
+            const iconMap = {
+                'success': 'bi-check-circle-fill',
+                'error': 'bi-x-circle-fill',
+                'warning': 'bi-exclamation-triangle-fill',
+                'info': 'bi-info-circle-fill'
+            };
+            const bgMap = {
+                'success': 'bg-success',
+                'error': 'bg-danger',
+                'warning': 'bg-warning',
+                'info': 'bg-info'
+            };
+            
+            const toastHTML = `
+                <div id="${toastId}" class="toast align-items-center text-white ${bgMap[type]} border-0" role="alert" aria-live="assertive" aria-atomic="true">
+                    <div class="d-flex">
+                        <div class="toast-body">
+                            <i class="bi ${iconMap[type]} me-2"></i>
+                            ${message}
+                        </div>
+                        <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+                    </div>
+                </div>
+            `;
+            
+            toastContainer.insertAdjacentHTML('beforeend', toastHTML);
+            const toastElement = document.getElementById(toastId);
+            const toast = new bootstrap.Toast(toastElement, { delay: 5000 });
+            toast.show();
+            
+            toastElement.addEventListener('hidden.bs.toast', () => {
+                toastElement.remove();
+            });
+        }
+        
+        function createToastContainer() {
+            const container = document.createElement('div');
+            container.className = 'toast-container';
+            document.body.appendChild(container);
+            return container;
+        }
+        
+        // Filter Sidebar Toggle (Mobile)
+        document.addEventListener('DOMContentLoaded', function() {
+            const filterToggleBtn = document.getElementById('filterToggleBtn');
+            const filterSidebar = document.getElementById('filterSidebar');
+            const filterBackdrop = document.getElementById('filterBackdrop');
+            
+            if (filterToggleBtn && filterSidebar) {
+                filterToggleBtn.addEventListener('click', function() {
+                    filterSidebar.classList.toggle('show');
+                    if (filterBackdrop) {
+                        filterBackdrop.classList.toggle('show');
+                    }
+                });
+                
+                if (filterBackdrop) {
+                    filterBackdrop.addEventListener('click', function() {
+                        filterSidebar.classList.remove('show');
+                        filterBackdrop.classList.remove('show');
+                    });
+                }
+            }
+            
+            // Form validation feedback
+            const forms = document.querySelectorAll('.needs-validation');
+            forms.forEach(form => {
+                form.addEventListener('submit', function(event) {
+                    if (!form.checkValidity()) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                    }
+                    form.classList.add('was-validated');
+                }, false);
+            });
+        });
+    </script>
+    
+    {% block extra_js %}{% endblock %}
+</body>
+</html>

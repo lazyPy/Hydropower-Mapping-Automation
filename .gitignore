@@ -1,0 +1,95 @@
+# Python
+*.py[cod]
+*$py.class
+*.so
+.Python
+__pycache__/
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Django
+*.log
+db.sqlite3
+db.sqlite3-journal
+/media
+/staticfiles
+/static
+
+# Environment
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Uploads
+media/uploads/
+media/datasets/
+
+# Test coverage
+htmlcov/
+.coverage
+.coverage.*
+.pytest_cache/
+.tox/
+
+# Documentation builds
+docs/_build/
+site/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Database dumps
+*.sql
+*.dump
+
+# Compiled translations
+*.mo
+*.pot
+
+# Django stuff
+local_settings.py
+
+# Large data files (keep sample data in INPUT DATA/)
+*.tif
+*.tfw
+*.ovr
+*.aux.xml
+# But include sample data
+!INPUT\ DATA/**/*.tif
+!INPUT\ DATA/**/*.tfw
+!INPUT\ DATA/**/*.ovr
+!INPUT\ DATA/**/*.aux.xml

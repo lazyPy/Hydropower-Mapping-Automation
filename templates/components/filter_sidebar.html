@@ -1,0 +1,347 @@
+<!-- Responsive Filter Sidebar -->
+<div class="filter-backdrop" id="filterBackdrop"></div>
+
+<aside class="filter-sidebar" id="filterSidebar">
+    <div class="p-3 border-bottom">
+        <div class="d-flex justify-content-between align-items-center">
+            <h5 class="mb-0 fw-bold">
+                <i class="bi bi-funnel-fill text-primary"></i>
+                Filters
+            </h5>
+            <button type="button" class="btn-close d-lg-none" id="closeSidebar"></button>
+        </div>
+    </div>
+    
+    <div class="p-3">
+        <form id="filterForm">
+            <!-- Min Head Filter -->
+            <div class="mb-4">
+                <label for="minHead" class="form-label fw-semibold">
+                    Min Head (m)
+                </label>
+                <input type="number" 
+                       class="form-control" 
+                       id="minHead" 
+                       name="min_head"
+                       min="0" 
+                       max="2000" 
+                       step="1" 
+                       value="0"
+                       placeholder="Enter min head">
+            </div>
+            
+            <!-- Max Head Filter -->
+            <div class="mb-4">
+                <label for="maxHead" class="form-label fw-semibold">
+                    Max Head (m)
+                </label>
+                <input type="number" 
+                       class="form-control" 
+                       id="maxHead" 
+                       name="max_head"
+                       min="0" 
+                       max="2000" 
+                       step="1" 
+                       value="2000"
+                       placeholder="Enter max head">
+            </div>
+            
+            <!-- Flow Rate Filter -->
+            <div class="mb-4">
+                <label for="flowRate" class="form-label fw-semibold">
+                    Flow Rate (m³/s)
+                </label>
+                <input type="number" 
+                       class="form-control" 
+                       id="flowRate" 
+                       name="flow_rate"
+                       min="0" 
+                       max="1000" 
+                       step="0.1" 
+                       value="0"
+                       placeholder="Enter flow rate">
+            </div>
+            
+            <!-- Scenario/Return Period Filter -->
+            <div class="mb-4">
+                <label for="scenario" class="form-label fw-semibold">
+                    Return Period / Scenario
+                </label>
+                <select class="form-select" id="scenario" name="scenario">
+                    <option value="">All Scenarios</option>
+                    <option value="2yr">2-Year</option>
+                    <option value="5yr">5-Year</option>
+                    <option value="10yr">10-Year</option>
+                    <option value="25yr">25-Year</option>
+                    <option value="50yr">50-Year</option>
+                    <option value="100yr">100-Year</option>
+                </select>
+            </div>
+            
+            <!-- Power Classification Filter -->
+            <div class="mb-4">
+                <label class="form-label fw-semibold">Power Classification</label>
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" value="pico" id="classPico" name="classification[]" checked>
+                    <label class="form-check-label" for="classPico">
+                        Pico (&lt;5 kW)
+                    </label>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" value="micro" id="classMicro" name="classification[]" checked>
+                    <label class="form-check-label" for="classMicro">
+                        Micro (5-100 kW)
+                    </label>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" value="mini" id="classMini" name="classification[]" checked>
+                    <label class="form-check-label" for="classMini">
+                        Mini (100 kW - 1 MW)
+                    </label>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" value="small" id="classSmall" name="classification[]" checked>
+                    <label class="form-check-label" for="classSmall">
+                        Small (1-10 MW)
+                    </label>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" value="medium" id="classMedium" name="classification[]" checked>
+                    <label class="form-check-label" for="classMedium">
+                        Medium (10-50 MW)
+                    </label>
+                </div>
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" value="large" id="classLarge" name="classification[]" checked>
+                    <label class="form-check-label" for="classLarge">
+                        Large (&gt;50 MW)
+                    </label>
+                </div>
+            </div>
+            
+            <!-- Result Count -->
+            <div class="alert alert-info mb-4">
+                <div class="d-flex align-items-center">
+                    <i class="bi bi-info-circle-fill me-2"></i>
+                    <div>
+                        <strong id="resultCount">0</strong> sites match filters
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Action Buttons -->
+            <div class="d-grid gap-2">
+                <button type="submit" class="btn btn-primary">
+                    <i class="bi bi-check-circle"></i> Apply Filters
+                </button>
+                <button type="button" class="btn btn-outline-secondary" id="resetFilters">
+                    <i class="bi bi-arrow-clockwise"></i> Reset All
+                </button>
+            </div>
+        </form>
+        
+        <!-- Layer Toggles with Opacity Controls -->
+        <div class="mt-4 pt-4 border-top">
+            <h6 class="fw-bold mb-3">
+                <i class="bi bi-layers-fill"></i> Map Layers
+            </h6>
+            
+            <div class="mb-3">
+                <div class="form-check form-switch mb-2">
+                    <input class="form-check-input" type="checkbox" id="layerSites" checked>
+                    <label class="form-check-label" for="layerSites">
+                        Site Pairs
+                    </label>
+                </div>
+                <div class="ms-4 mb-2">
+                    <label class="form-label small">Opacity: <span id="opacitySites">100</span>%</label>
+                    <input type="range" class="form-range form-range-sm" id="opacitySliderSites" 
+                           min="0" max="100" value="100" step="10">
+                </div>
+            </div>
+            
+            <div class="mb-3">
+                <div class="form-check form-switch mb-2">
+                    <input class="form-check-input" type="checkbox" id="layerStreams" checked>
+                    <label class="form-check-label" for="layerStreams">
+                        Stream Network
+                    </label>
+                </div>
+                <div class="ms-4 mb-2">
+                    <label class="form-label small">Opacity: <span id="opacityStreams">70</span>%</label>
+                    <input type="range" class="form-range form-range-sm" id="opacitySliderStreams" 
+                           min="0" max="100" value="70" step="10">
+                </div>
+            </div>
+            
+            <div class="mb-3">
+                <div class="form-check form-switch mb-2">
+                    <input class="form-check-input" type="checkbox" id="layerWatersheds">
+                    <label class="form-check-label" for="layerWatersheds">
+                        Watersheds
+                    </label>
+                </div>
+                <div class="ms-4 mb-2">
+                    <label class="form-label small">Opacity: <span id="opacityWatersheds">40</span>%</label>
+                    <input type="range" class="form-range form-range-sm" id="opacitySliderWatersheds" 
+                           min="0" max="100" value="40" step="10">
+                </div>
+            </div>
+            
+            <div class="mb-3">
+                <div class="form-check form-switch mb-2">
+                    <input class="form-check-input" type="checkbox" id="layerSubbasins">
+                    <label class="form-check-label" for="layerSubbasins">
+                        Subbasins
+                    </label>
+                </div>
+                <div class="ms-4 mb-2">
+                    <label class="form-label small">Opacity: <span id="opacitySubbasins">50</span>%</label>
+                    <input type="range" class="form-range form-range-sm" id="opacitySliderSubbasins" 
+                           min="0" max="100" value="50" step="10">
+                </div>
+            </div>
+            
+            <div class="mb-3">
+                <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="layerBridges">
+                    <label class="form-check-label" for="layerBridges">
+                        Bridges/POIs
+                    </label>
+                </div>
+                <div class="ms-4 mb-2">
+                    <label class="form-label small">Opacity: <span id="opacityBridges">100</span>%</label>
+                    <input type="range" class="form-range form-range-sm" id="opacitySliderBridges" 
+                           min="0" max="100" value="100" step="10">
+                </div>
+            </div>
+        </div>
+        
+        <!-- Spatial Extent Filter -->
+        <div class="mt-4 pt-4 border-top">
+            <h6 class="fw-bold mb-3">
+                <i class="bi bi-bounding-box"></i> Spatial Filter
+            </h6>
+            <div class="d-grid gap-2">
+                <button type="button" class="btn btn-sm btn-outline-primary" id="drawBoundingBox">
+                    <i class="bi bi-pencil-square"></i> Draw Bounding Box
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="clearBoundingBox" disabled>
+                    <i class="bi bi-x-circle"></i> Clear Extent
+                </button>
+            </div>
+            <small class="text-muted mt-2 d-block">Draw a box on the map to filter sites by location</small>
+        </div>
+    </div>
+</aside>
+
+<!-- Mobile Filter Toggle Button (Fixed Position) -->
+<button class="btn btn-primary d-lg-none" 
+        id="filterToggleBtn"
+        style="position: fixed; bottom: 20px; left: 20px; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+    <i class="bi bi-funnel-fill"></i> Filters
+</button>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Reset filters
+    const resetBtn = document.getElementById('resetFilters');
+    if (resetBtn) {
+        resetBtn.addEventListener('click', function() {
+            const form = document.getElementById('filterForm');
+            form.reset();
+            
+            // Set default values for new fields
+            document.getElementById('minHead').value = 0;
+            document.getElementById('maxHead').value = 2000;
+            document.getElementById('flowRate').value = 0;
+            
+            // Trigger filter update
+            if (typeof applyFilters === 'function') {
+                applyFilters();
+            }
+        });
+    }
+    
+    // Close sidebar on mobile
+    const closeSidebar = document.getElementById('closeSidebar');
+    const filterSidebar = document.getElementById('filterSidebar');
+    const filterBackdrop = document.getElementById('filterBackdrop');
+    
+    if (closeSidebar) {
+        closeSidebar.addEventListener('click', function() {
+            filterSidebar.classList.remove('show');
+            filterBackdrop.classList.remove('show');
+        });
+    }
+    
+    // Auto-apply filters on change (debounced)
+    let filterTimeout;
+    const filterInputs = document.querySelectorAll('#filterForm input, #filterForm select');
+    filterInputs.forEach(input => {
+        input.addEventListener('change', function() {
+            clearTimeout(filterTimeout);
+            filterTimeout = setTimeout(() => {
+                if (typeof applyFilters === 'function') {
+                    applyFilters();
+                }
+            }, 300);
+        });
+    });
+    
+    // Layer toggle handlers
+    const layerToggles = ['layerSites', 'layerStreams', 'layerWatersheds', 'layerSubbasins', 'layerBridges'];
+    layerToggles.forEach(layerId => {
+        const toggle = document.getElementById(layerId);
+        if (toggle) {
+            toggle.addEventListener('change', function() {
+                const layerName = layerId.replace('layer', '').toLowerCase();
+                if (typeof toggleMapLayer === 'function') {
+                    toggleMapLayer(layerName, this.checked);
+                }
+            });
+        }
+    });
+    
+    // Opacity slider handlers
+    const opacitySliders = ['opacitySliderSites', 'opacitySliderStreams', 'opacitySliderWatersheds', 'opacitySliderSubbasins', 'opacitySliderBridges'];
+    opacitySliders.forEach(sliderId => {
+        const slider = document.getElementById(sliderId);
+        if (slider) {
+            const layerName = sliderId.replace('opacitySlider', '');
+            const valueDisplay = document.getElementById('opacity' + layerName);
+            
+            slider.addEventListener('input', function() {
+                if (valueDisplay) {
+                    valueDisplay.textContent = this.value;
+                }
+                
+                const layerKey = layerName.toLowerCase();
+                if (typeof updateLayerOpacity === 'function') {
+                    updateLayerOpacity(layerKey, parseFloat(this.value) / 100);
+                }
+            });
+        }
+    });
+    
+    // Spatial filter handlers
+    const drawBtn = document.getElementById('drawBoundingBox');
+    const clearBtn = document.getElementById('clearBoundingBox');
+    
+    if (drawBtn) {
+        drawBtn.addEventListener('click', function() {
+            if (typeof enableBoundingBoxDraw === 'function') {
+                enableBoundingBoxDraw();
+            }
+        });
+    }
+    
+    if (clearBtn) {
+        clearBtn.addEventListener('click', function() {
+            if (typeof clearBoundingBox === 'function') {
+                clearBoundingBox();
+            }
+        });
+    }
+});
+</script>
