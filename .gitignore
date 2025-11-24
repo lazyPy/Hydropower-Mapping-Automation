@@ -9,6 +9,9 @@ dist/
 build/
 *.egg
 
+# Explicitly ignore Python virtual environment
+env/
+
 # Django
 *.log
 db.sqlite3
@@ -20,7 +23,6 @@ db.sqlite3-journal
 # Environment
 .env
 .venv
-env/
 venv/
 ENV/
 env.bak/
@@ -93,3 +95,5 @@ local_settings.py
 !INPUT\ DATA/**/*.tfw
 !INPUT\ DATA/**/*.ovr
 !INPUT\ DATA/**/*.aux.xml
+
+# End of .gitignore
