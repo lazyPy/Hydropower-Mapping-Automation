@@ -8,8 +8,6 @@
 <!-- Leaflet MarkerCluster CSS -->
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
-<!-- Leaflet Draw CSS for spatial filtering -->
-<link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
 <style>
     /* Map Container - Full screen layout */
     #map {
@@ -81,16 +79,78 @@
         right: 10px;
         z-index: 1000;
         background: white;
-        padding: 15px;
         border-radius: 8px;
         box-shadow: 0 2px 8px rgba(0,0,0,0.15);
         max-width: 250px;
+        overflow: hidden;
+        transition: all 0.3s ease;
+    }
+    
+    .legend-header {
+        padding: 12px 15px;
+        background: #f8fafc;
+        border-bottom: 1px solid #e5e7eb;
+        cursor: pointer;
+        user-select: none;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+    
+    .legend-header:hover {
+        background: #f1f5f9;
+    }
+    
+    .legend-toggle-icon {
+        transition: transform 0.3s ease;
+    }
+    
+    .map-legend.collapsed .legend-toggle-icon {
+        transform: rotate(-90deg);
+    }
+    
+    .legend-body {
+        padding: 15px;
+        max-height: 500px;
+        overflow-y: auto;
+        transition: max-height 0.3s ease, padding 0.3s ease, opacity 0.3s ease;
+    }
+    
+    .map-legend.collapsed .legend-body {
+        max-height: 0;
+        padding-top: 0;
+        padding-bottom: 0;
+        opacity: 0;
+        overflow: hidden;
     }
     
     .legend-item {
         display: flex;
         align-items: center;
         margin-bottom: 8px;
+    }
+    
+    .legend-item.no-data {
+        opacity: 0.4;
+    }
+    
+    .legend-item.hidden {
+        display: none;
+    }
+    
+    .legend-count {
+        margin-left: auto;
+        background: #e5e7eb;
+        color: #374151;
+        font-size: 0.7rem;
+        padding: 1px 6px;
+        border-radius: 10px;
+        font-weight: 600;
+    }
+    
+    .legend-item.no-data .legend-count {
+        background: #f3f4f6;
+        color: #9ca3af;
     }
     
     .legend-color {
@@ -180,8 +240,43 @@
         
         .map-legend {
             bottom: 70px;
+            right: auto;
+            left: 10px;
             max-width: 200px;
             font-size: 0.875rem;
+        }
+        
+        .legend-header {
+            padding: 10px 12px;
+        }
+        
+        .legend-body {
+            padding: 12px;
+            max-height: 250px;
+        }
+    }
+    
+    /* Tablet adjustments - avoid layer control overlap */
+    @media (min-width: 769px) and (max-width: 991px) {
+        .map-legend {
+            bottom: 30px;
+            right: 10px;
+        }
+        
+        .legend-body {
+            max-height: 350px;
+        }
+    }
+    
+    /* Make layer control collapsible for better space on smaller screens */
+    @media (max-width: 991px) {
+        .leaflet-control-layers {
+            max-width: 200px;
+        }
+        
+        .leaflet-control-layers-expanded {
+            max-height: calc(100vh - 200px);
+            overflow-y: auto;
         }
     }
 </style>
@@ -195,84 +290,99 @@
 <div id="map"></div>
 
 <!-- Map Legend -->
-<div class="map-legend">
-    <h6 class="fw-bold mb-3">
-        <i class="bi bi-info-circle"></i> Legend
-    </h6>
-    
-    <div class="legend-section mb-3">
-        <small class="text-muted fw-semibold d-block mb-2">Site Power Output</small>
-        <div class="legend-item">
-            <div class="legend-color" style="background: #10b981;"></div>
-            <small>Pico (&lt;5 kW)</small>
-        </div>
-        <div class="legend-item">
-            <div class="legend-color" style="background: #3b82f6;"></div>
-            <small>Micro (5-100 kW)</small>
-        </div>
-        <div class="legend-item">
-            <div class="legend-color" style="background: #8b5cf6;"></div>
-            <small>Mini (100 kW - 1 MW)</small>
-        </div>
-        <div class="legend-item">
-            <div class="legend-color" style="background: #f59e0b;"></div>
-            <small>Small (1-10 MW)</small>
-        </div>
-        <div class="legend-item">
-            <div class="legend-color" style="background: #ef4444;"></div>
-            <small>Medium (10-50 MW)</small>
-        </div>
-        <div class="legend-item">
-            <div class="legend-color" style="background: #dc2626;"></div>
-            <small>Large (&gt;50 MW)</small>
-        </div>
+<div class="map-legend" id="mapLegend">
+    <div class="legend-header" id="legendToggle" title="Click to toggle legend">
+        <h6 class="fw-bold mb-0">
+            <i class="bi bi-info-circle"></i> Legend
+        </h6>
+        <i class="bi bi-chevron-down legend-toggle-icon"></i>
     </div>
     
-    <div class="legend-section">
-        <small class="text-muted fw-semibold d-block mb-2">Layers</small>
-        <div class="legend-item">
-            <div class="legend-color" style="background: #3b82f6;"></div>
-            <small>Stream Network (Order 1-5)</small>
+    <div class="legend-body">
+        <div class="legend-section mb-3">
+            <small class="text-muted fw-semibold d-block mb-2">Site Power Output</small>
+            <div class="legend-item" id="legend-pico">
+                <div class="legend-color" style="background: #10b981;"></div>
+                <small>Pico (&lt;5 kW)</small>
+                <span class="legend-count" id="count-pico">0</span>
+            </div>
+            <div class="legend-item" id="legend-micro">
+                <div class="legend-color" style="background: #3b82f6;"></div>
+                <small>Micro (5-100 kW)</small>
+                <span class="legend-count" id="count-micro">0</span>
+            </div>
+            <div class="legend-item" id="legend-mini">
+                <div class="legend-color" style="background: #8b5cf6;"></div>
+                <small>Mini (100 kW - 1 MW)</small>
+                <span class="legend-count" id="count-mini">0</span>
+            </div>
+            <div class="legend-item" id="legend-small">
+                <div class="legend-color" style="background: #f59e0b;"></div>
+                <small>Small (1-10 MW)</small>
+                <span class="legend-count" id="count-small">0</span>
+            </div>
+            <div class="legend-item" id="legend-medium">
+                <div class="legend-color" style="background: #ef4444;"></div>
+                <small>Medium (10-50 MW)</small>
+                <span class="legend-count" id="count-medium">0</span>
+            </div>
+            <div class="legend-item" id="legend-large">
+                <div class="legend-color" style="background: #dc2626;"></div>
+                <small>Large (&gt;50 MW)</small>
+                <span class="legend-count" id="count-large">0</span>
+            </div>
         </div>
-        <div class="legend-item">
-            <div class="legend-color" style="background: rgba(59, 130, 246, 0.1); border: 2px solid #3b82f6;"></div>
-            <small>Watersheds</small>
+        
+        <div class="legend-section">
+            <small class="text-muted fw-semibold d-block mb-2">Layers</small>
+            <div class="legend-item" id="legend-streams">
+                <div class="legend-color" style="background: #3b82f6;"></div>
+                <small>Stream Network</small>
+                <span class="legend-count" id="count-streams">0</span>
+            </div>
+            <div class="legend-item" id="legend-watersheds">
+                <div class="legend-color" style="background: rgba(59, 130, 246, 0.1); border: 2px solid #3b82f6;"></div>
+                <small>Watersheds</small>
+                <span class="legend-count" id="count-watersheds">0</span>
+            </div>
+            <div class="legend-item" id="legend-subbasins">
+                <div class="legend-color" style="background: rgba(16, 185, 129, 0.2); border: 2px solid #10b981;"></div>
+                <small>Subbasins</small>
+                <span class="legend-count" id="count-subbasins">0</span>
+            </div>
+            <div class="legend-item" id="legend-bridges">
+                <i class="bi bi-geo-alt-fill" style="color: #f59e0b; font-size: 18px; margin-right: 8px;"></i>
+                <small>Bridges/POIs</small>
+                <span class="legend-count" id="count-bridges">0</span>
+            </div>
         </div>
-        <div class="legend-item">
-            <div class="legend-color" style="background: rgba(16, 185, 129, 0.2); border: 2px solid #10b981;"></div>
-            <small>Subbasins</small>
-        </div>
-        <div class="legend-item">
-            <i class="bi bi-geo-alt-fill" style="color: #f59e0b; font-size: 18px; margin-right: 8px;"></i>
-            <small>Bridges/POIs</small>
-        </div>
-    </div>
-    
-    <div class="legend-section mt-3">
-        <small class="text-muted fw-semibold d-block mb-2">Infrastructure (Top 5 Sites)</small>
-        <div class="legend-item">
-            <i class="bi bi-water" style="color: #0ea5e9; font-size: 20px; margin-right: 8px;"></i>
-            <small>Water Intake/Weir</small>
-        </div>
-        <div class="legend-item">
-            <i class="bi bi-filter-circle-fill" style="color: #06b6d4; font-size: 18px; margin-right: 8px;"></i>
-            <small>Settling Basin</small>
-        </div>
-        <div class="legend-item">
-            <div class="legend-color" style="background: #059669; border: 2px dashed #059669; width: 30px;"></div>
-            <small>Channel</small>
-        </div>
-        <div class="legend-item">
-            <i class="bi bi-box-fill" style="color: #a855f7; font-size: 18px; margin-right: 8px;"></i>
-            <small>Forebay Tank</small>
-        </div>
-        <div class="legend-item">
-            <div class="legend-color" style="background: #dc2626; width: 30px;"></div>
-            <small>Penstock Pipe</small>
-        </div>
-        <div class="legend-item">
-            <i class="bi bi-lightning-charge-fill" style="color: #f59e0b; font-size: 22px; margin-right: 8px;"></i>
-            <small>Powerhouse</small>
+        
+        <div class="legend-section mt-3">
+            <small class="text-muted fw-semibold d-block mb-2">Infrastructure</small>
+            <div class="legend-item" id="legend-intake">
+                <i class="bi bi-water" style="color: #0ea5e9; font-size: 20px; margin-right: 8px;"></i>
+                <small>Water Intake/Weir</small>
+            </div>
+            <div class="legend-item" id="legend-settling">
+                <i class="bi bi-filter-circle-fill" style="color: #06b6d4; font-size: 18px; margin-right: 8px;"></i>
+                <small>Settling Basin</small>
+            </div>
+            <div class="legend-item" id="legend-channel">
+                <div class="legend-color" style="background: #059669; border: 2px dashed #059669; width: 30px;"></div>
+                <small>Channel</small>
+            </div>
+            <div class="legend-item" id="legend-forebay">
+                <i class="bi bi-box-fill" style="color: #a855f7; font-size: 18px; margin-right: 8px;"></i>
+                <small>Forebay Tank</small>
+            </div>
+            <div class="legend-item" id="legend-penstock">
+                <div class="legend-color" style="background: #dc2626; width: 30px;"></div>
+                <small>Penstock Pipe</small>
+            </div>
+            <div class="legend-item" id="legend-powerhouse">
+                <i class="bi bi-lightning-charge-fill" style="color: #f59e0b; font-size: 22px; margin-right: 8px;"></i>
+                <small>Powerhouse</small>
+            </div>
         </div>
     </div>
 </div>
@@ -294,15 +404,13 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <!-- Leaflet MarkerCluster JS -->
 <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
-<!-- Leaflet Draw JS for spatial filtering -->
-<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
 <script>
 // Map Configuration
 const MAP_CONFIG = {
-    // Matiao, Pantukan, Davao de Oro, Philippines coordinates
-    // Center of Matiao River Basin area (actual DEM center)
-    center: [7.178256, 126.002943], // [latitude, longitude]
-    zoom: 13,
+    // Claveria, Misamis Oriental, Philippines coordinates
+    // Center of Claveria watershed area (from actual site data)
+    center: [8.6085, 124.9500], // [latitude, longitude]
+    zoom: 14,
     minZoom: 10,
     maxZoom: 18,
     
@@ -337,9 +445,6 @@ let map;
 let baseLayers = {};
 let overlayLayers = {};
 let markerClusterGroup;
-let drawnItems; // For spatial filtering
-let drawControl; // Leaflet Draw control
-let currentBounds = null; // Current bounding box filter
 let allSiteData = []; // Store all site data for client-side filtering
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -352,6 +457,25 @@ document.addEventListener('DOMContentLoaded', function() {
             e.preventDefault(); // Prevent page reload
             applyFilters();
         });
+    }
+    
+    // Handle legend toggle
+    const legendToggle = document.getElementById('legendToggle');
+    const mapLegend = document.getElementById('mapLegend');
+    if (legendToggle && mapLegend) {
+        legendToggle.addEventListener('click', function() {
+            mapLegend.classList.toggle('collapsed');
+            // Store preference in localStorage
+            localStorage.setItem('legendCollapsed', mapLegend.classList.contains('collapsed'));
+        });
+        
+        // Restore legend state from localStorage, or collapse on mobile by default
+        const legendCollapsed = localStorage.getItem('legendCollapsed');
+        const isMobile = window.innerWidth <= 768;
+        
+        if (legendCollapsed === 'true' || (legendCollapsed === null && isMobile)) {
+            mapLegend.classList.add('collapsed');
+        }
     }
 });
 
@@ -381,10 +505,11 @@ function initializeMap() {
         maxZoom: 17
     });
     
-    // Add layer control
+    // Add layer control - collapsed on mobile/tablet for better space usage
+    const isMobileOrTablet = window.innerWidth <= 991;
     const layerControl = L.control.layers(baseLayers, {}, {
         position: 'topright',
-        collapsed: false
+        collapsed: isMobileOrTablet
     }).addTo(map);
     
     // Store layer control reference for dynamic updates
@@ -401,56 +526,6 @@ function initializeMap() {
     // map.addLayer(markerClusterGroup);  // Commented out to hide inlet/outlet points
     overlayLayers['Site Points (Inlet/Outlet)'] = markerClusterGroup;
     window.layerControl.addOverlay(markerClusterGroup, 'Site Points (Inlet/Outlet)');
-    
-    // Initialize drawing layer for spatial filtering
-    drawnItems = new L.FeatureGroup();
-    map.addLayer(drawnItems);
-    
-    // Configure draw control (only rectangle for bounding box)
-    drawControl = new L.Control.Draw({
-        draw: {
-            rectangle: {
-                shapeOptions: {
-                    color: '#3b82f6',
-                    weight: 2,
-                    fillOpacity: 0.1
-                }
-            },
-            polygon: false,
-            polyline: false,
-            circle: false,
-            marker: false,
-            circlemarker: false
-        },
-        edit: {
-            featureGroup: drawnItems,
-            remove: false
-        }
-    });
-    // Don't add draw control to map by default - controlled by button
-    
-    // Handle draw created event
-    map.on(L.Draw.Event.CREATED, function(event) {
-        const layer = event.layer;
-        drawnItems.clearLayers();
-        drawnItems.addLayer(layer);
-        
-        // Get bounding box
-        const bounds = layer.getBounds();
-        currentBounds = bounds;
-        
-        // Enable clear button
-        const clearBtn = document.getElementById('clearBoundingBox');
-        if (clearBtn) clearBtn.disabled = false;
-        
-        // Apply spatial filter
-        applyFilters();
-        
-        // Remove draw control after drawing
-        if (drawControl) map.removeControl(drawControl);
-        
-        showToast('Bounding box applied', 'success');
-    });
     
     // Add scale control
     L.control.scale({
@@ -497,7 +572,13 @@ function loadMapData() {
             loadingOverlay.classList.add('d-none');
         }
         showToast('Map layers loaded successfully', 'success');
-        updateResultCount(getSiteCount());
+        updateResultCount(getSiteCount(), false); // No animation on initial load
+        
+        // Apply initial opacity values from sidebar sliders
+        applyInitialOpacity();
+        
+        // Update legend with actual counts
+        updateLegendCounts();
     }).catch(error => {
         console.error('Error loading map data:', error);
         if (loadingOverlay) {
@@ -577,8 +658,7 @@ function renderSitePairs(geojson) {
     // Don't add site pairs to map by default - only show infrastructure
     // sitePairLines.addTo(map);  // Commented out to hide inlet-outlet lines
     
-    // Create markers for inlet/outlet points with detailed popups (also hidden by default)
-    /* Commented out to hide inlet/outlet markers
+    // Create markers for inlet/outlet points with detailed popups (hidden by default)
     geojson.features.forEach(feature => {
         const props = feature.properties;
         const power = props.power || 0;
@@ -587,7 +667,7 @@ function renderSitePairs(geojson) {
         // Create detailed popup content
         const popupContent = createSitePopup(props);
         
-        // Inlet marker
+        // Inlet marker (white border)
         const inletMarker = L.circleMarker([props.inlet_lat, props.inlet_lng], {
             radius: 6,
             fillColor: color,
@@ -602,7 +682,7 @@ function renderSitePairs(geojson) {
             direction: 'top'
         });
         
-        // Outlet marker
+        // Outlet marker (black border)
         const outletMarker = L.circleMarker([props.outlet_lat, props.outlet_lng], {
             radius: 6,
             fillColor: color,
@@ -620,7 +700,6 @@ function renderSitePairs(geojson) {
         markerClusterGroup.addLayer(inletMarker);
         markerClusterGroup.addLayer(outletMarker);
     });
-    */ // End of commented out inlet/outlet markers section
 }
 
 // Create popup content for site pairs
@@ -1084,20 +1163,35 @@ function toggleMapLayer(layerName, visible) {
     const actualLayerName = layerMap[layerName];
     const layer = overlayLayers[actualLayerName];
     
+    console.log('Layer lookup:', actualLayerName, 'Found:', !!layer, 'Has map:', layer ? map.hasLayer(layer) : 'N/A');
+    
     if (layer) {
         if (visible) {
-            map.addLayer(layer);
+            if (!map.hasLayer(layer)) {
+                map.addLayer(layer);
+                console.log('Added layer:', actualLayerName);
+            }
         } else {
-            map.removeLayer(layer);
+            if (map.hasLayer(layer)) {
+                map.removeLayer(layer);
+                console.log('Removed layer:', actualLayerName);
+            }
         }
+    } else {
+        console.warn('Layer not found in overlayLayers:', actualLayerName);
+        console.log('Available layers:', Object.keys(overlayLayers));
     }
     
     // Toggle marker cluster for site points
     if (layerName === 'sites') {
         if (visible) {
-            map.addLayer(markerClusterGroup);
+            if (!map.hasLayer(markerClusterGroup)) {
+                map.addLayer(markerClusterGroup);
+            }
         } else {
-            map.removeLayer(markerClusterGroup);
+            if (map.hasLayer(markerClusterGroup)) {
+                map.removeLayer(markerClusterGroup);
+            }
         }
     }
 }
@@ -1114,6 +1208,9 @@ function applyFilters() {
     };
     
     console.log('Applying filters:', filters);
+    
+    // Show loading state
+    showResultCountLoading();
     
     // Client-side filtering for fast updates (when data is already loaded)
     // Increased threshold to 5000 to support classification filtering (requires client-side power calculation)
@@ -1140,15 +1237,6 @@ function applyFilters() {
                 if (!filters.classifications.includes(classification)) return false;
             }
             
-            // Apply spatial extent filter
-            if (currentBounds) {
-                const inletPoint = L.latLng(props.inlet_lat, props.inlet_lng);
-                const outletPoint = L.latLng(props.outlet_lat, props.outlet_lng);
-                if (!currentBounds.contains(inletPoint) && !currentBounds.contains(outletPoint)) {
-                    return false;
-                }
-            }
-            
             return true;
         });
         
@@ -1157,9 +1245,13 @@ function applyFilters() {
             type: 'FeatureCollection',
             features: filtered
         };
-        renderSitePairs(filteredGeoJSON);
-        updateResultCount(filtered.length);
-        showToast(`Client-side filter: ${filtered.length} sites found`, 'success');
+        
+        // Small delay to show loading animation
+        setTimeout(() => {
+            renderSitePairs(filteredGeoJSON);
+            updateResultCount(filtered.length);
+            showToast(`Client-side filter: ${filtered.length} sites found`, 'success');
+        }, 150);
         
     } else {
         // Use server-side filtering for large datasets
@@ -1168,13 +1260,6 @@ function applyFilters() {
         if (filters.max_head && filters.max_head < 2000) params.append('max_head', filters.max_head);
         if (filters.flow_rate) params.append('flow_rate', filters.flow_rate);
         if (filters.scenario) params.append('scenario', filters.scenario);
-        
-        // Add spatial extent to server request if available
-        if (currentBounds) {
-            const sw = currentBounds.getSouthWest();
-            const ne = currentBounds.getNorthEast();
-            params.append('bbox', `${sw.lng},${sw.lat},${ne.lng},${ne.lat}`);
-        }
         
         // Reload site pairs with filters
         fetch(`{% url "hydropower:geojson_site_pairs" %}?${params.toString()}`)
@@ -1218,12 +1303,53 @@ function getSiteCount() {
     return 0;
 }
 
-// Update result count in filter sidebar
-function updateResultCount(count) {
+// Update result count in filter sidebar with animation
+function updateResultCount(count, showAnimation = true) {
     const resultCountElement = document.getElementById('resultCount');
+    const resultSpinner = document.getElementById('resultSpinner');
+    const resultIcon = document.getElementById('resultIcon');
+    const resultLoading = document.getElementById('resultLoading');
+    const resultCountWrapper = document.getElementById('resultCountWrapper');
+    
+    // Hide loading state
+    if (resultSpinner) resultSpinner.classList.add('d-none');
+    if (resultIcon) resultIcon.classList.remove('d-none');
+    if (resultLoading) resultLoading.classList.add('d-none');
+    if (resultCountWrapper) resultCountWrapper.classList.remove('d-none');
+    
     if (resultCountElement) {
-        resultCountElement.textContent = count.toLocaleString();
+        if (showAnimation) {
+            // Add updating class for scale effect
+            resultCountElement.classList.add('updating');
+            
+            // Short delay, then update the value
+            setTimeout(() => {
+                resultCountElement.textContent = count.toLocaleString();
+                resultCountElement.classList.remove('updating');
+                resultCountElement.classList.add('updated');
+                
+                // Remove animation class after animation completes
+                setTimeout(() => {
+                    resultCountElement.classList.remove('updated');
+                }, 400);
+            }, 200);
+        } else {
+            resultCountElement.textContent = count.toLocaleString();
+        }
     }
+}
+
+// Show loading state for result count
+function showResultCountLoading() {
+    const resultSpinner = document.getElementById('resultSpinner');
+    const resultIcon = document.getElementById('resultIcon');
+    const resultLoading = document.getElementById('resultLoading');
+    const resultCountWrapper = document.getElementById('resultCountWrapper');
+    
+    if (resultSpinner) resultSpinner.classList.remove('d-none');
+    if (resultIcon) resultIcon.classList.add('d-none');
+    if (resultLoading) resultLoading.classList.remove('d-none');
+    if (resultCountWrapper) resultCountWrapper.classList.add('d-none');
 }
 
 // Get marker color based on power output
@@ -1257,6 +1383,26 @@ function transformCoordinates(coords, fromCRS, toCRS) {
 }
 
 // ===== NEW FUNCTIONS FOR ENHANCEMENTS =====
+
+// Apply initial opacity values from sidebar sliders after layers load
+function applyInitialOpacity() {
+    const opacitySettings = {
+        'streams': 'opacitySliderStreams',
+        'watersheds': 'opacitySliderWatersheds',
+        'subbasins': 'opacitySliderSubbasins',
+        'bridges': 'opacitySliderBridges',
+        'sites': 'opacitySliderSites'
+    };
+    
+    for (const [layerName, sliderId] of Object.entries(opacitySettings)) {
+        const slider = document.getElementById(sliderId);
+        if (slider) {
+            const opacity = parseFloat(slider.value) / 100;
+            updateLayerOpacity(layerName, opacity);
+        }
+    }
+    console.log('Applied initial opacity values from sidebar sliders');
+}
 
 // Update layer opacity
 function updateLayerOpacity(layerName, opacity) {
@@ -1295,37 +1441,85 @@ function updateLayerOpacity(layerName, opacity) {
     }
 }
 
-// Enable bounding box drawing
-function enableBoundingBoxDraw() {
-    // Check if draw control exists and is not already added
-    if (drawControl && !map._controlContainer.contains(drawControl._container)) {
-        map.addControl(drawControl);
-        showToast('Draw a rectangle on the map to filter by area', 'info');
+// Update legend counts and gray out items with no data
+function updateLegendCounts() {
+    // Count power classifications from site data
+    const powerCounts = {
+        pico: 0,
+        micro: 0,
+        mini: 0,
+        small: 0,
+        medium: 0,
+        large: 0
+    };
+    
+    if (allSiteData && allSiteData.length > 0) {
+        allSiteData.forEach(feature => {
+            const props = feature.properties;
+            const head = props.head || 0;
+            const discharge = props.discharge || 0;
+            // P = ρ × g × Q × H × η (in kW)
+            const power = 1000 * 9.81 * discharge * head * 0.7 / 1000;
+            
+            if (power < 5) powerCounts.pico++;
+            else if (power < 100) powerCounts.micro++;
+            else if (power < 1000) powerCounts.mini++;
+            else if (power < 10000) powerCounts.small++;
+            else if (power < 50000) powerCounts.medium++;
+            else powerCounts.large++;
+        });
     }
     
-    // Start rectangle drawing
-    const rectangleDrawer = new L.Draw.Rectangle(map, drawControl.options.draw.rectangle);
-    rectangleDrawer.enable();
-}
-
-// Clear bounding box
-function clearBoundingBox() {
-    drawnItems.clearLayers();
-    currentBounds = null;
+    // Update power classification counts
+    Object.keys(powerCounts).forEach(key => {
+        const countEl = document.getElementById(`count-${key}`);
+        const legendEl = document.getElementById(`legend-${key}`);
+        if (countEl) countEl.textContent = powerCounts[key];
+        if (legendEl) {
+            if (powerCounts[key] === 0) {
+                legendEl.classList.add('no-data');
+            } else {
+                legendEl.classList.remove('no-data');
+            }
+        }
+    });
     
-    // Disable clear button
-    const clearBtn = document.getElementById('clearBoundingBox');
-    if (clearBtn) clearBtn.disabled = true;
+    // Count layer features
+    const layerCounts = {
+        streams: 0,
+        watersheds: 0,
+        subbasins: 0,
+        bridges: 0
+    };
     
-    // Remove draw control if present
-    if (drawControl && map._controlContainer.contains(drawControl._container)) {
-        map.removeControl(drawControl);
+    if (overlayLayers['Stream Network']) {
+        overlayLayers['Stream Network'].eachLayer(() => layerCounts.streams++);
+    }
+    if (overlayLayers['Watersheds']) {
+        overlayLayers['Watersheds'].eachLayer(() => layerCounts.watersheds++);
+    }
+    if (overlayLayers['Subbasins']) {
+        overlayLayers['Subbasins'].eachLayer(() => layerCounts.subbasins++);
+    }
+    if (overlayLayers['Bridges/POIs']) {
+        overlayLayers['Bridges/POIs'].eachLayer(() => layerCounts.bridges++);
     }
     
-    // Reapply filters without spatial extent
-    applyFilters();
+    // Update layer counts
+    Object.keys(layerCounts).forEach(key => {
+        const countEl = document.getElementById(`count-${key}`);
+        const legendEl = document.getElementById(`legend-${key}`);
+        if (countEl) countEl.textContent = layerCounts[key];
+        if (legendEl) {
+            if (layerCounts[key] === 0) {
+                legendEl.classList.add('no-data');
+            } else {
+                legendEl.classList.remove('no-data');
+            }
+        }
+    });
     
-    showToast('Bounding box cleared', 'success');
+    console.log('Legend counts updated:', { powerCounts, layerCounts });
 }
 </script>
 {% endblock %}

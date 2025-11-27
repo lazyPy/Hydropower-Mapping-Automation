@@ -7,7 +7,7 @@ import uuid
 import mimetypes
 import numpy as np
 from pathlib import Path
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional, Dict, Any, List
 from django.core.files.uploadedfile import UploadedFile
 from django.core.files.base import ContentFile
 from django.conf import settings
@@ -1808,3 +1808,416 @@ def validate_and_process_hms(file_path, event_name, return_period=None,
         
     except Exception as e:
         raise ValueError(f"Error processing HMS data: {str(e)}")
+
+
+# ============================================================================
+# HEC-HMS BASIN FILE PARSING
+# ============================================================================
+
+def parse_hms_basin_file(basin_file_path: str) -> Dict[str, Any]:
+    """
+    Parse HEC-HMS .basin file to extract subbasin geometry and metadata.
+    
+    The .basin file contains:
+    - Subbasin centroids (Canvas X/Y in UTM coordinates)
+    - Drainage areas (km²)
+    - Flow network topology (Downstream connections)
+    - Hydrologic parameters (Curve Number, Lag time, etc.)
+    
+    Args:
+        basin_file_path: Path to .basin file
+        
+    Returns:
+        Dict with keys:
+            - subbasins: List of dicts with {name, centroid, area_km2, downstream, ...}
+            - junctions: List of dicts with {name, centroid, downstream}
+            - reaches: List of dicts with {name, centroid, from_centroid, downstream}
+            - sinks: List of dicts with {name, centroid}
+            - crs: Coordinate system WKT string
+            - basin_name: Basin name
+    """
+    try:
+        from shapely.geometry import Point
+        
+        basin_data = {
+            'subbasins': [],
+            'junctions': [],
+            'reaches': [],
+            'sinks': [],
+            'crs': None,
+            'basin_name': None
+        }
+        
+        with open(basin_file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # Parse basin name
+            if line.startswith('Basin:'):
+                basin_data['basin_name'] = line.split(':', 1)[1].strip()
+            
+            # Parse coordinate system
+            elif line.startswith('Coordinate System:'):
+                # Extract CRS (can span multiple lines)
+                crs_lines = []
+                i += 1
+                while i < len(lines) and not lines[i].strip().startswith('Terrain:'):
+                    crs_lines.append(lines[i].strip())
+                    i += 1
+                basin_data['crs'] = ' '.join(crs_lines)
+                continue
+            
+            # Parse Subbasin
+            elif line.startswith('Subbasin:'):
+                subbasin = _parse_basin_element(lines, i, 'Subbasin')
+                if subbasin:
+                    basin_data['subbasins'].append(subbasin)
+                    # Skip to end of this element
+                    while i < len(lines) and not lines[i].strip().startswith('End:'):
+                        i += 1
+            
+            # Parse Junction
+            elif line.startswith('Junction:'):
+                junction = _parse_basin_element(lines, i, 'Junction')
+                if junction:
+                    basin_data['junctions'].append(junction)
+                    while i < len(lines) and not lines[i].strip().startswith('End:'):
+                        i += 1
+            
+            # Parse Reach
+            elif line.startswith('Reach:'):
+                reach = _parse_basin_element(lines, i, 'Reach')
+                if reach:
+                    basin_data['reaches'].append(reach)
+                    while i < len(lines) and not lines[i].strip().startswith('End:'):
+                        i += 1
+            
+            # Parse Sink
+            elif line.startswith('Sink:'):
+                sink = _parse_basin_element(lines, i, 'Sink')
+                if sink:
+                    basin_data['sinks'].append(sink)
+                    while i < len(lines) and not lines[i].strip().startswith('End:'):
+                        i += 1
+            
+            i += 1
+        
+        return basin_data
+        
+    except Exception as e:
+        raise ValueError(f"Error parsing .basin file: {str(e)}")
+
+
+def _parse_basin_element(lines: List[str], start_idx: int, element_type: str) -> Optional[Dict[str, Any]]:
+    """
+    Helper function to parse a basin element (Subbasin, Junction, Reach, Sink).
+    
+    Args:
+        lines: All lines from .basin file
+        start_idx: Index of the element's header line
+        element_type: Type of element ('Subbasin', 'Junction', 'Reach', 'Sink')
+        
+    Returns:
+        Dict with element properties, or None if parsing fails
+    """
+    from shapely.geometry import Point
+    
+    try:
+        # Parse element name from header line
+        header_line = lines[start_idx].strip()
+        name = header_line.split(':', 1)[1].strip()
+        
+        element = {
+            'name': name,
+            'type': element_type,
+            'centroid': None,
+            'centroid_geom': None,
+            'area_km2': None,
+            'downstream': None,
+            'lat': None,
+            'lon': None,
+        }
+        
+        # Parse element properties
+        i = start_idx + 1
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            if line.startswith('End:'):
+                break
+            
+            # Parse Canvas X/Y (centroid coordinates)
+            if line.startswith('Canvas X:'):
+                canvas_x = float(line.split(':', 1)[1].strip())
+                element['centroid_x'] = canvas_x
+            elif line.startswith('Canvas Y:'):
+                canvas_y = float(line.split(':', 1)[1].strip())
+                element['centroid_y'] = canvas_y
+            
+            # Parse Lat/Lon (for validation)
+            elif line.startswith('Latitude Degrees:'):
+                element['lat'] = float(line.split(':', 1)[1].strip())
+            elif line.startswith('Longitude Degrees:'):
+                element['lon'] = float(line.split(':', 1)[1].strip())
+            
+            # Parse drainage area (for Subbasins)
+            elif line.startswith('Area:'):
+                element['area_km2'] = float(line.split(':', 1)[1].strip())
+            
+            # Parse downstream connection
+            elif line.startswith('Downstream:'):
+                element['downstream'] = line.split(':', 1)[1].strip()
+            
+            # Parse From Canvas X/Y (for Reaches)
+            elif line.startswith('From Canvas X:'):
+                element['from_centroid_x'] = float(line.split(':', 1)[1].strip())
+            elif line.startswith('From Canvas Y:'):
+                element['from_centroid_y'] = float(line.split(':', 1)[1].strip())
+            
+            i += 1
+        
+        # Create Point geometry from centroid coordinates
+        if 'centroid_x' in element and 'centroid_y' in element:
+            element['centroid'] = (element['centroid_x'], element['centroid_y'])
+            element['centroid_geom'] = Point(element['centroid_x'], element['centroid_y'])
+        
+        # Create from-point geometry for Reaches
+        if 'from_centroid_x' in element and 'from_centroid_y' in element:
+            element['from_centroid'] = (element['from_centroid_x'], element['from_centroid_y'])
+            element['from_centroid_geom'] = Point(element['from_centroid_x'], element['from_centroid_y'])
+        
+        return element
+        
+    except Exception as e:
+        print(f"Warning: Could not parse {element_type} at line {start_idx}: {e}")
+        return None
+
+
+# ============================================================================
+# HEC-HMS DSS FILE READING
+# ============================================================================
+
+def parse_hms_dss_file(dss_file_path: str, pathnames: List[str]) -> pd.DataFrame:
+    """
+    Parse HEC-HMS .dss file to extract time series data using pydsstools.
+    
+    DSS (Data Storage System) is HEC's proprietary format for storing time series.
+    Pathnames follow the format: /A/B/C/D/E/F/
+    - A: Unused (usually empty)
+    - B: Location (e.g., "Subbasin-1", "Junction-1")
+    - C: Parameter (e.g., "FLOW", "PRECIP-INC")
+    - D: Unused (usually empty)
+    - E: Time interval (e.g., "15MIN", "1HOUR")
+    - F: Version (e.g., "RUN:Run 1", "MET:Met 1")
+    
+    Args:
+        dss_file_path: Path to .dss file
+        pathnames: List of DSS pathnames to extract (e.g., ["//Subbasin-1/FLOW//15MIN/RUN:Run 1/"])
+        
+    Returns:
+        pandas.DataFrame with MultiIndex (datetime, pathname) and 'value' column
+        
+    Raises:
+        ImportError: If pydsstools is not installed
+        ValueError: If DSS file cannot be read or pathnames not found
+    """
+    try:
+        from pydsstools.heclib.dss import HecDss
+        import pandas as pd
+        from datetime import datetime
+    except ImportError:
+        raise ImportError(
+            "pydsstools is not installed. Install with: pip install pydsstools\n"
+            "Note: pydsstools requires HEC-DSS libraries (may need HEC-DSS Vue installed)"
+        )
+    
+    try:
+        # Open DSS file (HecDss is a module, use HecDss.Open())
+        dss_file = HecDss.Open(dss_file_path)
+        
+        # Storage for all time series
+        all_data = []
+        
+        for pathname in pathnames:
+            try:
+                # Read time series from DSS
+                ts = dss_file.read_ts(pathname)
+                
+                if ts is None:
+                    print(f"Warning: Could not read pathname '{pathname}' from DSS file")
+                    continue
+                
+                # Extract time series data
+                # pydsstools returns a namedtuple with: times, values, units, type, interval, etc.
+                times = ts.pytimes  # List of datetime objects
+                values = ts.values  # Numpy array of values
+                units = ts.units if hasattr(ts, 'units') else 'Unknown'
+                
+                # Create DataFrame for this pathname
+                df_ts = pd.DataFrame({
+                    'datetime': times,
+                    'value': values,
+                    'pathname': pathname,
+                    'units': units
+                })
+                
+                all_data.append(df_ts)
+                
+                print(f"Loaded {len(times)} timesteps from '{pathname}' ({units})")
+                
+            except Exception as e:
+                print(f"Warning: Error reading pathname '{pathname}': {e}")
+                continue
+        
+        # Close DSS file
+        dss_file.close()
+        
+        if len(all_data) == 0:
+            raise ValueError("No data was extracted from DSS file")
+        
+        # Combine all time series
+        df_combined = pd.concat(all_data, ignore_index=True)
+        
+        # Set MultiIndex for efficient querying
+        df_combined = df_combined.set_index(['datetime', 'pathname'])
+        df_combined = df_combined.sort_index()
+        
+        return df_combined
+        
+    except Exception as e:
+        raise ValueError(f"Error reading DSS file: {str(e)}")
+
+
+def extract_dss_pathnames_from_results_xml(results_xml_path: str) -> Dict[str, List[str]]:
+    """
+    Extract DSS pathnames from HEC-HMS results XML file.
+    
+    The results XML contains references to time series data stored in DSS files.
+    This function parses the XML to get the pathnames needed for reading DSS.
+    
+    Args:
+        results_xml_path: Path to results XML file (e.g., RUN_Run_1.results.xml)
+        
+    Returns:
+        Dict mapping element names to lists of DSS pathnames
+        Example: {
+            'Subbasin-1': ['//Subbasin-1/FLOW//15MIN/RUN:Run 1/', ...],
+            'Junction-1': ['//Junction-1/FLOW//15MIN/RUN:Run 1/', ...],
+        }
+    """
+    import xml.etree.ElementTree as ET
+    
+    try:
+        tree = ET.parse(results_xml_path)
+        root = tree.getroot()
+        
+        pathnames_by_element = {}
+        
+        # Parse each basin element
+        for basin_element in root.findall('BasinElement'):
+            element_name = basin_element.get('name')
+            element_type = basin_element.get('type')
+            
+            pathnames = []
+            
+            # Find all time series references
+            hydrology = basin_element.find('Hydrology')
+            if hydrology is not None:
+                for time_series in hydrology.findall('TimeSeries'):
+                    pathname_elem = time_series.find('DssPathname')
+                    if pathname_elem is not None:
+                        pathname = pathname_elem.text
+                        pathnames.append(pathname)
+            
+            if pathnames:
+                pathnames_by_element[element_name] = pathnames
+        
+        return pathnames_by_element
+        
+    except Exception as e:
+        raise ValueError(f"Error parsing results XML: {str(e)}")
+
+
+def load_hms_hydrographs(
+    basin_file_path: str,
+    results_xml_path: str,
+    dss_file_path: str,
+    element_types: List[str] = ['Subbasin', 'Junction', 'Sink']
+) -> Dict[str, pd.DataFrame]:
+    """
+    High-level function to load HEC-HMS hydrographs with spatial geometry.
+    
+    This combines basin geometry parsing with DSS time series extraction.
+    
+    Args:
+        basin_file_path: Path to .basin file
+        results_xml_path: Path to results XML file
+        dss_file_path: Path to .dss file with time series
+        element_types: List of element types to load (default: ['Subbasin', 'Junction', 'Sink'])
+        
+    Returns:
+        Dict mapping element names to DataFrames with columns:
+            - datetime: Timestamp
+            - discharge: Flow value (m³/s)
+            - centroid_x: X coordinate (UTM)
+            - centroid_y: Y coordinate (UTM)
+            - area_km2: Drainage area (for subbasins)
+    """
+    try:
+        # Step 1: Parse basin file for geometry
+        basin_data = parse_hms_basin_file(basin_file_path)
+        
+        # Step 2: Extract DSS pathnames from results XML
+        pathnames_by_element = extract_dss_pathnames_from_results_xml(results_xml_path)
+        
+        # Step 3: Filter pathnames to get FLOW time series only
+        flow_pathnames = []
+        for element_name, pathnames in pathnames_by_element.items():
+            for pathname in pathnames:
+                # Check if this is a flow/discharge pathname
+                if '/FLOW/' in pathname and '/FLOW-' not in pathname:
+                    flow_pathnames.append(pathname)
+        
+        # Step 4: Load time series from DSS
+        df_dss = parse_hms_dss_file(dss_file_path, flow_pathnames)
+        
+        # Step 5: Match time series to basin elements
+        hydrographs = {}
+        
+        for element_type in element_types:
+            elements_key = element_type.lower() + 's'  # 'subbasins', 'junctions', 'sinks'
+            
+            for element in basin_data.get(elements_key, []):
+                element_name = element['name']
+                
+                # Find matching time series
+                # DSS pathname format: //ELEMENT_NAME/FLOW//15MIN/RUN:Run 1/
+                matching_rows = df_dss.index.get_level_values('pathname').str.contains(f"//{element_name}/FLOW//")
+                
+                if not matching_rows.any():
+                    continue
+                
+                # Extract time series for this element
+                df_element = df_dss[matching_rows].copy()
+                df_element = df_element.reset_index()
+                df_element = df_element.rename(columns={'value': 'discharge'})
+                
+                # Add spatial metadata
+                if element['centroid']:
+                    df_element['centroid_x'] = element['centroid'][0]
+                    df_element['centroid_y'] = element['centroid'][1]
+                
+                if element['area_km2']:
+                    df_element['area_km2'] = element['area_km2']
+                
+                df_element['element_type'] = element_type
+                
+                hydrographs[element_name] = df_element
+        
+        return hydrographs
+        
+    except Exception as e:
+        raise ValueError(f"Error loading HMS hydrographs: {str(e)}")

@@ -149,8 +149,10 @@ class WatershedDelineator:
         Delineate watershed boundaries using flow direction.
         
         Args:
-            pour_points: Optional shapefile path with pour points (outlet locations)
-                        If None, extracts watersheds for all stream outlets
+            pour_points: Optional path to pour points:
+                        - If a .shp file: use specific pour point locations
+                        - If a .tif stream raster: create subbasins for each stream link
+                        - If None: extract all basins (many small basins)
         
         Returns:
             Path to watershed raster file
@@ -165,13 +167,49 @@ class WatershedDelineator:
         logger.info(f"Output watershed path: {watershed_raster_path}")
         
         if pour_points:
-            # Delineate watersheds from specific pour points
-            logger.info(f"Using pour points: {pour_points}")
-            self.wbt.watershed(
-                d8_pntr=flow_dir_path,
-                pour_pts=pour_points,
-                output=watershed_raster_path
-            )
+            if pour_points.endswith('.shp'):
+                # Delineate watersheds from specific pour points (shapefile)
+                logger.info(f"Using pour points shapefile: {pour_points}")
+                self.wbt.watershed(
+                    d8_pntr=flow_dir_path,
+                    pour_pts=pour_points,
+                    output=watershed_raster_path
+                )
+            elif pour_points.endswith('.tif'):
+                # Stream raster provided - first assign unique IDs to each stream link
+                # then create subbasins using those link IDs
+                stream_links_path = str(self.output_dir / 'stream_links.tif')
+                
+                logger.info(f"Creating stream link IDs from: {pour_points}")
+                
+                # Assign unique IDs to each stream link (segment between confluences)
+                self.wbt.stream_link_identifier(
+                    d8_pntr=flow_dir_path,
+                    streams=pour_points,
+                    output=stream_links_path,
+                    esri_pntr=False,
+                    zero_background=True
+                )
+                
+                # Count unique stream links
+                with rasterio.open(stream_links_path) as src:
+                    link_array = src.read(1)
+                    unique_links = np.unique(link_array[link_array > 0])
+                    logger.info(f"Created {len(unique_links)} unique stream links")
+                
+                # Use subbasins tool with the stream link IDs
+                logger.info(f"Delineating subbasins for {len(unique_links)} stream links")
+                self.wbt.subbasins(
+                    d8_pntr=flow_dir_path,
+                    streams=stream_links_path,
+                    output=watershed_raster_path
+                )
+            else:
+                logger.warning(f"Unknown pour_points format: {pour_points}, using basins")
+                self.wbt.basins(
+                    d8_pntr=flow_dir_path,
+                    output=watershed_raster_path
+                )
         else:
             # Use basins tool to extract all watersheds
             logger.info("Extracting all watershed basins")
@@ -541,6 +579,23 @@ class WatershedDelineator:
             'watershed_id': watershed_ids,
             'geometry': polygons
         }, crs=crs)
+        
+        logger.info(f"Raw vectorization: {len(watersheds_gdf)} polygon features")
+        
+        # Dissolve polygons by watershed_id to merge adjacent cells
+        logger.info("Dissolving polygons by watershed_id...")
+        watersheds_gdf = watersheds_gdf.dissolve(by='watershed_id', as_index=False)
+        logger.info(f"After dissolve: {len(watersheds_gdf)} watershed polygons")
+        
+        # Explode MultiPolygons back to individual Polygons
+        # This handles cases where a watershed has disconnected parts
+        from shapely.geometry import Polygon, MultiPolygon
+        
+        multi_count = len(watersheds_gdf[watersheds_gdf.geometry.type == 'MultiPolygon'])
+        if multi_count > 0:
+            logger.info(f"Exploding {multi_count} MultiPolygons to individual Polygons...")
+            watersheds_gdf = watersheds_gdf.explode(index_parts=False).reset_index(drop=True)
+            logger.info(f"After explode: {len(watersheds_gdf)} polygon features")
         
         # Compute watershed statistics
         watersheds_gdf['area_m2'] = watersheds_gdf.geometry.area

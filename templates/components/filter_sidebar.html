@@ -122,12 +122,37 @@
             <!-- Result Count -->
             <div class="alert alert-info mb-4">
                 <div class="d-flex align-items-center">
-                    <i class="bi bi-info-circle-fill me-2"></i>
+                    <i class="bi bi-info-circle-fill me-2" id="resultIcon"></i>
+                    <div class="spinner-border spinner-border-sm text-primary me-2 d-none" id="resultSpinner" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
                     <div>
-                        <strong id="resultCount">0</strong> sites match filters
+                        <span id="resultCountWrapper">
+                            <strong id="resultCount" class="result-count-animate">0</strong> sites match filters
+                        </span>
+                        <span id="resultLoading" class="d-none">Filtering...</span>
                     </div>
                 </div>
             </div>
+            
+            <style>
+                .result-count-animate {
+                    display: inline-block;
+                    transition: transform 0.2s ease, opacity 0.2s ease;
+                }
+                .result-count-animate.updating {
+                    transform: scale(1.2);
+                    opacity: 0.7;
+                }
+                .result-count-animate.updated {
+                    animation: countPulse 0.4s ease;
+                }
+                @keyframes countPulse {
+                    0% { transform: scale(1); }
+                    50% { transform: scale(1.3); color: #0d6efd; }
+                    100% { transform: scale(1); }
+                }
+            </style>
             
             <!-- Action Buttons -->
             <div class="d-grid gap-2">
@@ -139,106 +164,13 @@
                 </button>
             </div>
         </form>
-        
-        <!-- Layer Toggles with Opacity Controls -->
-        <div class="mt-4 pt-4 border-top">
-            <h6 class="fw-bold mb-3">
-                <i class="bi bi-layers-fill"></i> Map Layers
-            </h6>
-            
-            <div class="mb-3">
-                <div class="form-check form-switch mb-2">
-                    <input class="form-check-input" type="checkbox" id="layerSites" checked>
-                    <label class="form-check-label" for="layerSites">
-                        Site Pairs
-                    </label>
-                </div>
-                <div class="ms-4 mb-2">
-                    <label class="form-label small">Opacity: <span id="opacitySites">100</span>%</label>
-                    <input type="range" class="form-range form-range-sm" id="opacitySliderSites" 
-                           min="0" max="100" value="100" step="10">
-                </div>
-            </div>
-            
-            <div class="mb-3">
-                <div class="form-check form-switch mb-2">
-                    <input class="form-check-input" type="checkbox" id="layerStreams" checked>
-                    <label class="form-check-label" for="layerStreams">
-                        Stream Network
-                    </label>
-                </div>
-                <div class="ms-4 mb-2">
-                    <label class="form-label small">Opacity: <span id="opacityStreams">70</span>%</label>
-                    <input type="range" class="form-range form-range-sm" id="opacitySliderStreams" 
-                           min="0" max="100" value="70" step="10">
-                </div>
-            </div>
-            
-            <div class="mb-3">
-                <div class="form-check form-switch mb-2">
-                    <input class="form-check-input" type="checkbox" id="layerWatersheds">
-                    <label class="form-check-label" for="layerWatersheds">
-                        Watersheds
-                    </label>
-                </div>
-                <div class="ms-4 mb-2">
-                    <label class="form-label small">Opacity: <span id="opacityWatersheds">40</span>%</label>
-                    <input type="range" class="form-range form-range-sm" id="opacitySliderWatersheds" 
-                           min="0" max="100" value="40" step="10">
-                </div>
-            </div>
-            
-            <div class="mb-3">
-                <div class="form-check form-switch mb-2">
-                    <input class="form-check-input" type="checkbox" id="layerSubbasins">
-                    <label class="form-check-label" for="layerSubbasins">
-                        Subbasins
-                    </label>
-                </div>
-                <div class="ms-4 mb-2">
-                    <label class="form-label small">Opacity: <span id="opacitySubbasins">50</span>%</label>
-                    <input type="range" class="form-range form-range-sm" id="opacitySliderSubbasins" 
-                           min="0" max="100" value="50" step="10">
-                </div>
-            </div>
-            
-            <div class="mb-3">
-                <div class="form-check form-switch">
-                    <input class="form-check-input" type="checkbox" id="layerBridges">
-                    <label class="form-check-label" for="layerBridges">
-                        Bridges/POIs
-                    </label>
-                </div>
-                <div class="ms-4 mb-2">
-                    <label class="form-label small">Opacity: <span id="opacityBridges">100</span>%</label>
-                    <input type="range" class="form-range form-range-sm" id="opacitySliderBridges" 
-                           min="0" max="100" value="100" step="10">
-                </div>
-            </div>
-        </div>
-        
-        <!-- Spatial Extent Filter -->
-        <div class="mt-4 pt-4 border-top">
-            <h6 class="fw-bold mb-3">
-                <i class="bi bi-bounding-box"></i> Spatial Filter
-            </h6>
-            <div class="d-grid gap-2">
-                <button type="button" class="btn btn-sm btn-outline-primary" id="drawBoundingBox">
-                    <i class="bi bi-pencil-square"></i> Draw Bounding Box
-                </button>
-                <button type="button" class="btn btn-sm btn-outline-secondary" id="clearBoundingBox" disabled>
-                    <i class="bi bi-x-circle"></i> Clear Extent
-                </button>
-            </div>
-            <small class="text-muted mt-2 d-block">Draw a box on the map to filter sites by location</small>
-        </div>
     </div>
 </aside>
 
 <!-- Mobile Filter Toggle Button (Fixed Position) -->
 <button class="btn btn-primary d-lg-none" 
         id="filterToggleBtn"
-        style="position: fixed; bottom: 20px; left: 20px; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+        style="position: fixed; bottom: 30px; left: 20px; z-index: 1000; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
     <i class="bi bi-funnel-fill"></i> Filters
 </button>
 
@@ -324,24 +256,5 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
     
-    // Spatial filter handlers
-    const drawBtn = document.getElementById('drawBoundingBox');
-    const clearBtn = document.getElementById('clearBoundingBox');
-    
-    if (drawBtn) {
-        drawBtn.addEventListener('click', function() {
-            if (typeof enableBoundingBoxDraw === 'function') {
-                enableBoundingBoxDraw();
-            }
-        });
-    }
-    
-    if (clearBtn) {
-        clearBtn.addEventListener('click', function() {
-            if (typeof clearBoundingBox === 'function') {
-                clearBoundingBox();
-            }
-        });
-    }
 });
 </script>

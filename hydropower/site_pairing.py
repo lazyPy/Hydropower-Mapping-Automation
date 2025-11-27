@@ -25,20 +25,111 @@ from scipy.spatial import cKDTree
 logger = logging.getLogger(__name__)
 
 
+def calculate_head_losses(discharge: float, penstock_length: float, gross_head: float,
+                         penstock_roughness: float = 0.012, velocity_factor: float = 4.0,
+                         entrance_loss_coeff: float = 0.5, exit_loss_coeff: float = 1.0,
+                         bend_loss_coeff: float = 0.25, num_bends: int = 2) -> Dict[str, float]:
+    """
+    Calculate head losses in penstock and fittings (standalone function).
+    
+    This is the recommended function for calculating net head from gross head.
+    Uses Hazen-Williams formula for friction losses and standard coefficients
+    for minor losses.
+    
+    Formula: Net Head = Gross Head - Friction Loss - Minor Losses
+    
+    Args:
+        discharge: Flow rate (m³/s)
+        penstock_length: Penstock pipe length (m)
+        gross_head: Gross head (m)
+        penstock_roughness: Manning's n for pipe material (default 0.012 for steel)
+        velocity_factor: Design velocity in penstock (m/s, default 4.0)
+        entrance_loss_coeff: Entrance loss coefficient (default 0.5)
+        exit_loss_coeff: Exit loss coefficient (default 1.0)
+        bend_loss_coeff: Loss per 90° bend (default 0.25)
+        num_bends: Number of 90° bends in penstock (default 2)
+    
+    Returns:
+        Dictionary with loss components and net head:
+        - friction_loss: Friction head loss (m)
+        - entrance_loss: Entrance head loss (m)
+        - exit_loss: Exit head loss (m)
+        - bend_loss: Bend head losses (m)
+        - total_minor_loss: Sum of minor losses (m)
+        - total_head_loss: Total head loss (m)
+        - net_head: Net head after losses (m)
+        - gross_head: Original gross head (m)
+        - efficiency_factor: Net/Gross ratio (0-1)
+    
+    Example:
+        >>> losses = calculate_head_losses(discharge=5.0, penstock_length=200, gross_head=100)
+        >>> print(f"Net head: {losses['net_head']:.1f}m (efficiency: {losses['efficiency_factor']*100:.1f}%)")
+    """
+    g = 9.81  # gravitational acceleration
+    
+    if discharge <= 0 or gross_head <= 0:
+        return {
+            'friction_loss': 0, 
+            'entrance_loss': 0,
+            'exit_loss': 0,
+            'bend_loss': 0,
+            'total_minor_loss': 0,
+            'total_head_loss': 0,
+            'net_head': gross_head,
+            'gross_head': gross_head,
+            'efficiency_factor': 1.0
+        }
+    
+    # Calculate penstock diameter based on velocity
+    velocity = velocity_factor
+    diameter = np.sqrt((4 * discharge) / (np.pi * velocity))
+    
+    # Friction loss using Hazen-Williams formula (common in hydropower)
+    # hf = 10.67 * L * Q^1.852 / (C^1.852 * D^4.87)
+    C = 140  # Hazen-Williams coefficient for steel pipe
+    friction_loss = 10.67 * penstock_length * (discharge ** 1.852) / ((C ** 1.852) * (diameter ** 4.87))
+    
+    # Minor losses
+    entrance_loss = entrance_loss_coeff * (velocity ** 2) / (2 * g)
+    exit_loss = exit_loss_coeff * (velocity ** 2) / (2 * g)
+    bend_loss = num_bends * bend_loss_coeff * (velocity ** 2) / (2 * g)
+    
+    total_minor_loss = entrance_loss + exit_loss + bend_loss
+    total_head_loss = friction_loss + total_minor_loss
+    
+    # Net head (ensure non-negative)
+    net_head = max(0, gross_head - total_head_loss)
+    
+    # Efficiency factor
+    efficiency_factor = net_head / gross_head if gross_head > 0 else 0
+    
+    return {
+        'friction_loss': friction_loss,
+        'entrance_loss': entrance_loss,
+        'exit_loss': exit_loss,
+        'bend_loss': bend_loss,
+        'total_minor_loss': total_minor_loss,
+        'total_head_loss': total_head_loss,
+        'net_head': net_head,
+        'gross_head': gross_head,
+        'efficiency_factor': efficiency_factor
+    }
+
+
 @dataclass
 class PairingConfig:
     """Configuration parameters for inlet-outlet pairing algorithm"""
     
-    # Head constraints
-    min_head: float = 10.0  # meters
+    # Head constraints - LOWERED for micro/small hydro potential
+    min_head: float = 3.0  # meters (was 10.0, now captures micro-hydro)
     max_head: float = 500.0  # meters
     
-    # Distance constraints
-    min_river_distance: float = 100.0  # meters
-    max_river_distance: float = 5000.0  # meters
+    # Distance constraints - EXPANDED for more site discovery
+    min_river_distance: float = 50.0  # meters (was 100.0)
+    max_river_distance: float = 8000.0  # meters (was 5000.0)
     
     # Spacing and buffer
-    spacing_buffer: float = 200.0  # meters (minimum distance between sites)
+    spacing_buffer: float = 100.0  # meters (was 200.0, allow closer sites)
     land_buffer: float = 50.0  # meters (proximity to riverbanks)
     
     # Scoring weights (now configurable with validation)
@@ -59,20 +150,25 @@ class PairingConfig:
     
     # Performance limits (to avoid excessive computation)
     max_stream_segments: int = 5000  # Maximum number of stream segments to process
-    max_candidates_per_type: int = 1000  # Maximum inlet/outlet candidates
+    max_candidates_per_type: int = 2000  # Maximum inlet/outlet candidates (was 1000)
     
     # Physical constants
     rho: float = 1000.0  # kg/m³ (water density)
     g: float = 9.81  # m/s² (gravitational acceleration)
     
     # Search parameters
-    max_outlets_per_inlet: int = 10  # Maximum number of outlets to evaluate per inlet
-    min_stream_order: int = 2  # Minimum Strahler order for candidate sites
+    max_outlets_per_inlet: int = 15  # Maximum outlets per inlet (was 10)
+    min_stream_order: int = 1  # Minimum Strahler order (was 2, now captures all streams)
     
     # Land feasibility parameters
-    max_slope_percent: float = 30.0  # Maximum terrain slope for infrastructure (%)
-    min_road_distance: float = 5000.0  # Maximum distance from road for accessibility (m)
+    max_slope_percent: float = 45.0  # Maximum terrain slope for infrastructure (was 30%)
+    min_road_distance: float = 10000.0  # Maximum distance from road (was 5000m)
     check_land_use: bool = True  # Whether to validate land use suitability
+    
+    # Infrastructure validation parameters
+    validate_infrastructure_slope: bool = True  # Validate penstock/channel slope feasibility
+    max_penstock_slope: float = 80.0  # Maximum penstock slope in percent (near-vertical OK)
+    max_channel_slope: float = 5.0  # Maximum headrace channel slope in percent
     
     def validate_weights(self):
         """Validate that scoring weights sum to 1.0"""
@@ -709,8 +805,62 @@ class InletOutletPairing:
             'meets_land_constraint': self.check_land_proximity(inlet, outlet)
         }
         
+        # Add infrastructure slope validation if enabled
+        if self.config.validate_infrastructure_slope:
+            constraints['meets_infrastructure_slope'] = self.check_infrastructure_slope(
+                inlet, outlet, head, river_distance
+            )
+        
         is_feasible = all(constraints.values())
         return is_feasible, constraints
+    
+    def check_infrastructure_slope(self, inlet: Point, outlet: Point, 
+                                   head: float, river_distance: float) -> bool:
+        """
+        Validate infrastructure slope feasibility.
+        
+        Checks:
+        - Penstock slope (can be steep, up to 80%)
+        - Headrace channel slope (must be gentle, <5%)
+        
+        Args:
+            inlet: Inlet point geometry
+            outlet: Outlet point geometry
+            head: Hydraulic head (meters)
+            river_distance: River distance (meters)
+        
+        Returns:
+            True if infrastructure slopes are feasible
+        """
+        # Calculate euclidean distance
+        euclidean_dist = inlet.distance(outlet)
+        
+        if euclidean_dist < 1:
+            return False  # Too short
+        
+        # Calculate average slope (simplified)
+        avg_slope = (head / euclidean_dist) * 100  # in percent
+        
+        # Penstock slope (direct line) - can be steep
+        penstock_slope = avg_slope  # Simplified: direct inlet to outlet
+        if penstock_slope > self.config.max_penstock_slope:
+            logger.debug(f"Penstock slope {penstock_slope:.1f}% exceeds max {self.config.max_penstock_slope}%")
+            return False
+        
+        # For longer systems, estimate channel slope
+        # Channel typically follows 70% of the river distance
+        if river_distance > 200:  # Only for longer systems
+            # Estimate elevation drop along channel (about 20% of total head)
+            channel_head = head * 0.2
+            channel_length = river_distance * 0.7
+            
+            if channel_length > 0:
+                channel_slope = (channel_head / channel_length) * 100
+                if channel_slope > self.config.max_channel_slope:
+                    logger.debug(f"Channel slope {channel_slope:.1f}% exceeds max {self.config.max_channel_slope}%")
+                    return False
+        
+        return True
     
     def check_land_proximity(self, inlet: Point, outlet: Point) -> bool:
         """

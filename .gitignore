@@ -1,2 +1,14 @@
 env/
 docs/
+
+# Large data files
+INPUT DATA - Claveria/
+media/preprocessed/
+media/uploads/
+media/watersheds/
+media/vector_cache/
+logs/
+.playwright-mcp/
+*.tif
+*.aux.xml
+db.sqlite3

@@ -11,6 +11,7 @@ from django.shortcuts import render
 from django.http import JsonResponse, HttpResponse
 from django.views.decorators.cache import cache_page
 from django.db import models as django_models
+from django.conf import settings
 import logging
 
 from .models import RasterLayer, VectorLayer
@@ -475,72 +476,58 @@ def geojson_streams(request):
 @cache_page(60 * 10)  # Cache for 10 minutes
 def geojson_subbasins(request):
     """
-    GeoJSON endpoint for subbasins (from uploaded shapefiles).
+    GeoJSON endpoint for subbasins (from cached shapefile GeoJSON).
     
     Returns FeatureCollection with:
     - Polygon geometry (subbasin boundaries)
     - Subbasin attributes from shapefile
-    - CRS transformation: Detect source CRS → EPSG:4326
-    
-    Query parameters:
-    - dataset: Filter by dataset ID
+    - CRS transformation: EPSG:32651 → EPSG:4326
     """
     from pyproj import Transformer
-    import geopandas as gpd
+    from pathlib import Path
+    import json
     
     try:
-        dataset_id = request.GET.get('dataset')
-        
-        from .models import VectorLayer
-        queryset = VectorLayer.objects.filter(geometry_type='Polygon')
-        
-        if dataset_id:
-            queryset = queryset.filter(dataset_id=int(dataset_id))
-        
         features = []
         
-        for vector_layer in queryset[:10]:  # Limit to 10 datasets
-            # Read shapefile using geopandas
-            try:
-                dataset = vector_layer.dataset
-                shp_path = dataset.file.path
-                
-                gdf = gpd.read_file(shp_path)
-                
-                # Reproject to EPSG:4326 if needed
-                if gdf.crs and gdf.crs.to_epsg() != 4326:
-                    gdf = gdf.to_crs('EPSG:4326')
-                
-                # Convert to GeoJSON features
-                for idx, row in gdf.iterrows():
-                    geom = row.geometry
+        # Read from cached GeoJSON files (subbasin_*.geojson)
+        cache_dir = Path(settings.MEDIA_ROOT) / 'vector_cache'
+        
+        if cache_dir.exists():
+            for cache_file in cache_dir.glob('subbasin_*.geojson'):
+                try:
+                    with open(cache_file, 'r') as f:
+                        cached_data = json.load(f)
                     
-                    # Build properties from all non-geometry columns
-                    properties = {
-                        'dataset_id': dataset.id,
-                        'dataset_name': dataset.name,
-                        'feature_id': idx,
-                    }
+                    # Transform coordinates from EPSG:32651 to EPSG:4326
+                    transformer = Transformer.from_crs('EPSG:32651', 'EPSG:4326', always_xy=True)
                     
-                    # Add all shapefile attributes
-                    for col in gdf.columns:
-                        if col != 'geometry':
-                            val = row[col]
-                            # Convert numpy types to Python types
-                            if hasattr(val, 'item'):
-                                val = val.item()
-                            properties[col] = val
-                    
-                    feature = {
-                        'type': 'Feature',
-                        'geometry': geom.__geo_interface__,
-                        'properties': properties
-                    }
-                    features.append(feature)
-                    
-            except Exception as e:
-                logger.error(f"Error reading shapefile {vector_layer.id}: {str(e)}")
-                continue
+                    for feature in cached_data.get('features', []):
+                        # Transform geometry coordinates
+                        geom = feature['geometry']
+                        if geom['type'] == 'Polygon':
+                            new_coords = []
+                            for ring in geom['coordinates']:
+                                new_ring = [list(transformer.transform(x, y)) for x, y in ring]
+                                new_coords.append(new_ring)
+                            geom['coordinates'] = new_coords
+                        elif geom['type'] == 'MultiPolygon':
+                            new_coords = []
+                            for polygon in geom['coordinates']:
+                                new_polygon = []
+                                for ring in polygon:
+                                    new_ring = [list(transformer.transform(x, y)) for x, y in ring]
+                                    new_polygon.append(new_ring)
+                                new_coords.append(new_polygon)
+                            geom['coordinates'] = new_coords
+                        
+                        # Add source info to properties
+                        feature['properties']['source_file'] = cache_file.stem
+                        features.append(feature)
+                        
+                except Exception as e:
+                    logger.error(f"Error reading cache file {cache_file}: {str(e)}")
+                    continue
         
         geojson = {
             'type': 'FeatureCollection',
@@ -561,68 +548,54 @@ def geojson_subbasins(request):
 @cache_page(60 * 10)  # Cache for 10 minutes
 def geojson_bridges(request):
     """
-    GeoJSON endpoint for bridges/POIs (from uploaded point shapefiles).
+    GeoJSON endpoint for bridges/outlets (from cached shapefile GeoJSON).
     
     Returns FeatureCollection with:
-    - Point geometry (bridge/POI locations)
-    - Attributes from shapefile
-    - CRS transformation: Detect source CRS → EPSG:4326
-    
-    Query parameters:
-    - dataset: Filter by dataset ID
+    - Point geometry (bridge/outlet locations)
+    - Bridge attributes from shapefile
+    - CRS transformation: EPSG:32651 → EPSG:4326
     """
     from pyproj import Transformer
-    import geopandas as gpd
+    from pathlib import Path
+    import json
     
     try:
-        dataset_id = request.GET.get('dataset')
-        
-        from .models import VectorLayer
-        queryset = VectorLayer.objects.filter(geometry_type='Point')
-        
-        if dataset_id:
-            queryset = queryset.filter(dataset_id=int(dataset_id))
-        
         features = []
         
-        for vector_layer in queryset[:10]:
-            try:
-                dataset = vector_layer.dataset
-                shp_path = dataset.file.path
-                
-                gdf = gpd.read_file(shp_path)
-                
-                # Reproject to EPSG:4326 if needed
-                if gdf.crs and gdf.crs.to_epsg() != 4326:
-                    gdf = gdf.to_crs('EPSG:4326')
-                
-                for idx, row in gdf.iterrows():
-                    geom = row.geometry
+        # Read from cached GeoJSON files (bridge_*.geojson or outlet_*.geojson)
+        cache_dir = Path(settings.MEDIA_ROOT) / 'vector_cache'
+        
+        if cache_dir.exists():
+            for cache_file in list(cache_dir.glob('bridge_*.geojson')) + list(cache_dir.glob('outlet_*.geojson')):
+                try:
+                    with open(cache_file, 'r') as f:
+                        cached_data = json.load(f)
                     
-                    properties = {
-                        'dataset_id': dataset.id,
-                        'dataset_name': dataset.name,
-                        'feature_id': idx,
-                    }
+                    # Transform coordinates from EPSG:32651 to EPSG:4326
+                    transformer = Transformer.from_crs('EPSG:32651', 'EPSG:4326', always_xy=True)
                     
-                    # Add all shapefile attributes
-                    for col in gdf.columns:
-                        if col != 'geometry':
-                            val = row[col]
-                            if hasattr(val, 'item'):
-                                val = val.item()
-                            properties[col] = val
-                    
-                    feature = {
-                        'type': 'Feature',
-                        'geometry': geom.__geo_interface__,
-                        'properties': properties
-                    }
-                    features.append(feature)
-                    
-            except Exception as e:
-                logger.error(f"Error reading point shapefile {vector_layer.id}: {str(e)}")
-                continue
+                    for feature in cached_data.get('features', []):
+                        # Transform geometry coordinates
+                        geom = feature['geometry']
+                        if geom['type'] == 'Point':
+                            x, y = geom['coordinates'][:2]
+                            lon, lat = transformer.transform(x, y)
+                            geom['coordinates'] = [lon, lat]
+                        elif geom['type'] == 'MultiPoint':
+                            new_coords = []
+                            for point in geom['coordinates']:
+                                x, y = point[:2]
+                                lon, lat = transformer.transform(x, y)
+                                new_coords.append([lon, lat])
+                            geom['coordinates'] = new_coords
+                        
+                        # Add source info to properties
+                        feature['properties']['source_file'] = cache_file.stem
+                        features.append(feature)
+                        
+                except Exception as e:
+                    logger.error(f"Error reading cache file {cache_file}: {str(e)}")
+                    continue
         
         geojson = {
             'type': 'FeatureCollection',
