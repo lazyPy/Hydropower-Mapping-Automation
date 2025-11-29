@@ -516,6 +516,7 @@ class SitePair(gis_models.Model):
     # Validation flags
     meets_head_constraint = models.BooleanField(default=True, help_text="Passes minimum head constraint")
     meets_distance_constraint = models.BooleanField(default=True, help_text="Passes minimum river distance constraint")
+    meets_watershed_constraint = models.BooleanField(default=True, help_text="Both inlet and outlet are within watershed boundary")
     meets_land_constraint = models.BooleanField(default=True, help_text="Passes land proximity constraint")
     is_feasible = models.BooleanField(default=True, help_text="Passes all constraints")
     

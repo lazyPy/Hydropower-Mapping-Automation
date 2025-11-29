@@ -215,6 +215,8 @@ class InletOutletPairing:
         self.stream_nodes = None
         self.stream_graph = None  # NetworkX graph for connectivity
         self.node_spatial_index = None  # KDTree for spatial queries
+        self.watershed_polygons = None  # Watershed polygons from database
+        self.watershed_gdf = None  # GeoDataFrame of watershed polygons for spatial queries
         
     def load_dem(self, dem_path: str):
         """
@@ -253,6 +255,102 @@ class InletOutletPairing:
         
         # Build spatial index for efficient queries
         self._build_spatial_index()
+    
+    def load_watershed_polygons(self, raster_layer_id: int):
+        """
+        Load watershed polygons from PostGIS for boundary validation.
+        
+        Creates a UNION of all watershed polygons to form the overall basin boundary.
+        This ensures sites are within the overall river basin, not individual sub-basins.
+        
+        Args:
+            raster_layer_id: ID of the RasterLayer with watershed polygons
+        """
+        from hydropower.models import WatershedPolygon
+        from django.contrib.gis.geos import GEOSGeometry
+        from shapely.ops import unary_union
+        
+        # Load watershed polygons from database
+        watersheds = WatershedPolygon.objects.filter(raster_layer_id=raster_layer_id)
+        
+        if not watersheds.exists():
+            logger.warning(f"No watershed polygons found for RasterLayer {raster_layer_id}")
+            return
+        
+        # Convert to GeoDataFrame for spatial operations
+        watershed_data = []
+        for ws in watersheds:
+            watershed_data.append({
+                'watershed_id': ws.watershed_id,
+                'geometry': ws.geometry,
+                'area_km2': ws.area_km2
+            })
+        
+        # Create GeoDataFrame with shapely geometries
+        from shapely.geometry import shape
+        from shapely import wkt
+        from shapely.ops import unary_union
+        
+        watershed_geoms = []
+        all_polygons = []
+        for ws_data in watershed_data:
+            # Convert GEOS geometry to shapely
+            geom_wkt = ws_data['geometry'].wkt
+            shapely_geom = wkt.loads(geom_wkt)
+            watershed_geoms.append({
+                'watershed_id': ws_data['watershed_id'],
+                'area_km2': ws_data['area_km2'],
+                'geometry': shapely_geom
+            })
+            all_polygons.append(shapely_geom)
+        
+        # Create UNION of all watershed polygons to form the overall basin boundary
+        # This is critical - we want sites within the OVERALL basin, not individual sub-basins
+        basin_union = unary_union(all_polygons)
+        
+        # Store both individual watersheds and the unified basin
+        self.watershed_gdf = gpd.GeoDataFrame([{
+            'watershed_id': 0,
+            'area_km2': sum(ws['area_km2'] for ws in watershed_geoms),
+            'geometry': basin_union
+        }], crs='EPSG:32651')
+        self.watershed_polygons = watersheds
+        
+        logger.info(f"Created unified basin boundary from {len(watershed_geoms)} sub-watersheds (total area: {self.watershed_gdf['area_km2'].sum():.2f} km²)")
+    
+    def load_watershed_from_shapefile(self, shapefile_path: str):
+        """
+        Load watershed boundary from a shapefile (subbasin/basin boundary).
+        
+        This is the preferred method when you have a known basin boundary shapefile
+        (e.g., from HEC-HMS subbasin shapefile) which is more accurate than 
+        auto-delineated micro-watersheds.
+        
+        Args:
+            shapefile_path: Path to shapefile or GeoJSON with basin boundary
+        """
+        from shapely.ops import unary_union
+        
+        # Load the shapefile
+        gdf = gpd.read_file(shapefile_path)
+        
+        # Ensure CRS is EPSG:32651
+        if gdf.crs is None:
+            gdf.set_crs(epsg=32651, inplace=True)
+        elif gdf.crs.to_epsg() != 32651:
+            gdf = gdf.to_crs(epsg=32651)
+        
+        # Union all polygons to get overall basin
+        basin_union = unary_union(gdf.geometry.tolist())
+        total_area = gdf.area.sum() / 1e6  # km²
+        
+        self.watershed_gdf = gpd.GeoDataFrame([{
+            'watershed_id': 0,
+            'area_km2': total_area,
+            'geometry': basin_union
+        }], crs='EPSG:32651')
+        
+        logger.info(f"Loaded watershed boundary from shapefile: {total_area:.2f} km²")
     
     def _build_stream_graph(self):
         """Build NetworkX directed graph from stream network for connectivity analysis"""
@@ -340,6 +438,28 @@ class InletOutletPairing:
             self.node_spatial_index = cKDTree(coords)
             logger.info(f"Built spatial index with {len(coords)} nodes")
     
+    def _is_within_watershed(self, point: Point) -> bool:
+        """
+        Check if a point is within any watershed boundary.
+        
+        Args:
+            point: Shapely Point geometry
+        
+        Returns:
+            True if point is within watershed boundary, False otherwise
+        """
+        if self.watershed_gdf is None:
+            # No watershed boundaries loaded - assume all points are valid
+            logger.debug("No watershed boundaries loaded, skipping boundary check")
+            return True
+        
+        # Check if point intersects with any watershed polygon
+        for idx, watershed in self.watershed_gdf.iterrows():
+            if watershed.geometry.contains(point) or watershed.geometry.intersects(point):
+                return True
+        
+        return False
+    
     def extract_elevation(self, x: float, y: float) -> Optional[float]:
         """
         Extract elevation from DEM at given coordinates.
@@ -400,6 +520,12 @@ class InletOutletPairing:
                     # Get first point of LineString (upstream end)
                     coords = list(stream.geometry.coords)
                     point = Point(coords[0])
+                    
+                    # Check if point is within watershed boundary
+                    if not self._is_within_watershed(point):
+                        logger.debug(f"Inlet candidate at ({point.x:.1f}, {point.y:.1f}) outside watershed boundary, skipping")
+                        continue
+                    
                     elevation = self.extract_elevation(point.x, point.y)
                     if elevation is not None:
                         inlets.append({
@@ -471,6 +597,12 @@ class InletOutletPairing:
                     # Get last point of LineString (downstream end)
                     coords = list(stream.geometry.coords)
                     point = Point(coords[-1])
+                    
+                    # Check if point is within watershed boundary
+                    if not self._is_within_watershed(point):
+                        logger.debug(f"Outlet candidate at ({point.x:.1f}, {point.y:.1f}) outside watershed boundary, skipping")
+                        continue
+                    
                     elevation = self.extract_elevation(point.x, point.y)
                     if elevation is not None:
                         outlets.append({
@@ -790,6 +922,12 @@ class InletOutletPairing:
         """
         Apply constraint filters to site pair.
         
+        Includes validation for:
+        - Head constraints (min/max)
+        - Distance constraints (min/max river distance)
+        - Watershed boundary (both inlet and outlet must be within watershed)
+        - Land constraints (terrain slope, stream proximity)
+        
         Args:
             head: Hydraulic head (m)
             river_distance: Distance along river (m)
@@ -799,9 +937,18 @@ class InletOutletPairing:
         Returns:
             Tuple of (is_feasible, constraint_flags)
         """
+        # Watershed boundary constraint - CRITICAL for Claveria issue
+        inlet_in_watershed = self._is_within_watershed(inlet)
+        outlet_in_watershed = self._is_within_watershed(outlet)
+        meets_watershed_constraint = inlet_in_watershed and outlet_in_watershed
+        
+        if not meets_watershed_constraint:
+            logger.debug(f"Site pair outside watershed boundary: inlet={inlet_in_watershed}, outlet={outlet_in_watershed}")
+        
         constraints = {
             'meets_head_constraint': self.config.min_head <= head <= self.config.max_head,
             'meets_distance_constraint': self.config.min_river_distance <= river_distance <= self.config.max_river_distance,
+            'meets_watershed_constraint': meets_watershed_constraint,
             'meets_land_constraint': self.check_land_proximity(inlet, outlet)
         }
         
@@ -1223,6 +1370,7 @@ class InletOutletPairing:
                 hms_run=hms_run,
                 meets_head_constraint=pair['meets_head_constraint'],
                 meets_distance_constraint=pair['meets_distance_constraint'],
+                meets_watershed_constraint=pair.get('meets_watershed_constraint', True),
                 meets_land_constraint=pair['meets_land_constraint'],
                 is_feasible=pair['is_feasible']
             )

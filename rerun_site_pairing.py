@@ -129,6 +129,15 @@ def main():
         print("ERROR: No stream network found in database!")
         return
     
+    # Load watershed polygons for boundary validation (CRITICAL FIX)
+    print("Loading watershed boundaries for validation...")
+    pairing.load_watershed_polygons(raster_layer.id)
+    if pairing.watershed_gdf is not None:
+        print(f"Loaded {len(pairing.watershed_gdf)} watershed polygons")
+        print("✓ Sites will be constrained to watershed boundaries")
+    else:
+        print("WARNING: No watershed boundaries found - sites may fall outside basin")
+    
     # Run pairing algorithm
     print("\nRunning pairing algorithm...")
     pairs = pairing.run_pairing()

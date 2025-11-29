@@ -296,7 +296,7 @@ def geojson_site_pairs(request):
                     infrastructure_features.append({
                         'type': 'Feature',
                         'geometry': {'type': 'Point', 'coordinates': [lng, lat]},
-                        'properties': {'type': 'powerhouse', 'pair_id': pair.pair_id, 'rank': pair.rank, 'power_kw': round(pair.power, 2) if pair.power else None, 'elevation_m': round(powerhouse_elevation, 2) if powerhouse_elevation else None}
+                        'properties': {'type': 'powerhouse', 'pair_id': pair.pair_id, 'rank': pair.rank, 'power_kw': round(pair.power, 2) if pair.power is not None else None, 'elevation_m': round(powerhouse_elevation, 2) if powerhouse_elevation else None}
                     })
         
         # Combine site pairs and infrastructure into single FeatureCollection
