@@ -164,7 +164,7 @@ class DataProcessor:
         }
         
         # File paths (updated for Claveria data structure)
-        self.input_data_dir = Path(__file__).resolve().parent
+        self.input_data_dir = Path(__file__).resolve().parent / 'INPUT DATA - Claveria'
         self.dem_path = self.input_data_dir / 'WATERSHED DATA' / 'Terrain Data' / 'DEM.tif'
         self.shapefile_dir = self.input_data_dir / 'WATERSHED DATA' / 'Bridge & River'
         self.discharge_dir = self.input_data_dir / 'RAINFALL & DISCHARGE DATA'
