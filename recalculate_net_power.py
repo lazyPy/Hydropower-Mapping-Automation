@@ -136,14 +136,20 @@ def main():
     
     print("\nNet Power Range: {:.2f} - {:.2f} kW".format(min(net_powers), max(net_powers)))
     
-    # Classification
-    micro = sum(1 for p in net_powers if p < 100)
+    # Classification (standard hydropower classification)
+    pico = sum(1 for p in net_powers if p < 5)
+    micro = sum(1 for p in net_powers if 5 <= p < 100)
     mini = sum(1 for p in net_powers if 100 <= p < 1000)
-    small = sum(1 for p in net_powers if p >= 1000)
+    small = sum(1 for p in net_powers if 1000 <= p < 25000)
+    medium = sum(1 for p in net_powers if 25000 <= p < 100000)
+    large = sum(1 for p in net_powers if p >= 100000)
     print(f"\nClassification (Net Power):")
-    print(f"  Micro (<100 kW): {micro} sites")
-    print(f"  Mini (100-1000 kW): {mini} sites")
-    print(f"  Small (>1000 kW): {small} sites")
+    print(f"  Pico (<5 kW): {pico} sites")
+    print(f"  Micro (5-100 kW): {micro} sites")
+    print(f"  Mini (100 kW - 1 MW): {mini} sites")
+    print(f"  Small (1-25 MW): {small} sites")
+    print(f"  Medium (25-100 MW): {medium} sites")
+    print(f"  Large (>100 MW): {large} sites")
 
 
 if __name__ == '__main__':

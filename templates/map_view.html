@@ -318,17 +318,17 @@
             </div>
             <div class="legend-item" id="legend-small">
                 <div class="legend-color" style="background: #f59e0b;"></div>
-                <small>Small (1-10 MW)</small>
+                <small>Small (1-25 MW)</small>
                 <span class="legend-count" id="count-small">0</span>
             </div>
             <div class="legend-item" id="legend-medium">
                 <div class="legend-color" style="background: #ef4444;"></div>
-                <small>Medium (10-50 MW)</small>
+                <small>Medium (25-100 MW)</small>
                 <span class="legend-count" id="count-medium">0</span>
             </div>
             <div class="legend-item" id="legend-large">
                 <div class="legend-color" style="background: #dc2626;"></div>
-                <small>Large (&gt;50 MW)</small>
+                <small>Large (&gt;100 MW)</small>
                 <span class="legend-count" id="count-large">0</span>
             </div>
         </div>
@@ -1283,13 +1283,13 @@ function getPowerClassification(head, discharge) {
     // ρ = 1000 kg/m³, g = 9.81 m/s², η = 0.7
     const power = 1000 * 9.81 * discharge * head * 0.7 / 1000; // in kW
     
-    // Classify based on power output
+    // Classify based on power output (standard hydropower classification)
     if (power < 5) return 'pico';          // <5 kW
     if (power < 100) return 'micro';       // 5-100 kW
     if (power < 1000) return 'mini';       // 100 kW - 1 MW
-    if (power < 10000) return 'small';     // 1-10 MW
-    if (power < 50000) return 'medium';    // 10-50 MW
-    return 'large';                         // >50 MW
+    if (power < 25000) return 'small';     // 1-25 MW
+    if (power < 100000) return 'medium';   // 25-100 MW
+    return 'large';                         // >100 MW
 }
 
 // Get site count
@@ -1358,9 +1358,9 @@ function getPowerColor(power) {
     if (power < 5) return '#10b981';      // Green - Pico (<5 kW)
     if (power < 100) return '#3b82f6';    // Blue - Micro (5-100 kW)
     if (power < 1000) return '#8b5cf6';   // Purple - Mini (100 kW - 1 MW)
-    if (power < 10000) return '#f59e0b';  // Orange - Small (1-10 MW)
-    if (power < 50000) return '#ef4444'; // Red - Medium (10-50 MW)
-    return '#dc2626';                      // Dark Red - Large (>50 MW)
+    if (power < 25000) return '#f59e0b';  // Orange - Small (1-25 MW)
+    if (power < 100000) return '#ef4444'; // Red - Medium (25-100 MW)
+    return '#dc2626';                      // Dark Red - Large (>100 MW)
 }
 
 // Show toast notification
@@ -1464,8 +1464,8 @@ function updateLegendCounts() {
             if (power < 5) powerCounts.pico++;
             else if (power < 100) powerCounts.micro++;
             else if (power < 1000) powerCounts.mini++;
-            else if (power < 10000) powerCounts.small++;
-            else if (power < 50000) powerCounts.medium++;
+            else if (power < 25000) powerCounts.small++;
+            else if (power < 100000) powerCounts.medium++;
             else powerCounts.large++;
         });
     }

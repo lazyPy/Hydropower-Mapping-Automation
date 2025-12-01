@@ -167,14 +167,20 @@ def assign_discharge_to_sites(representative_q, hms_run):
         print(f"Average power: {sum(powers)/len(powers):.2f} kW")
         print(f"Total potential: {sum(powers):.2f} kW ({sum(powers)/1000:.2f} MW)")
         
-        # Classify by power output
-        micro = sum(1 for p in powers if p < 100)
+        # Classify by power output (standard hydropower classification)
+        pico = sum(1 for p in powers if p < 5)
+        micro = sum(1 for p in powers if 5 <= p < 100)
         mini = sum(1 for p in powers if 100 <= p < 1000)
-        small = sum(1 for p in powers if p >= 1000)
+        small = sum(1 for p in powers if 1000 <= p < 25000)
+        medium = sum(1 for p in powers if 25000 <= p < 100000)
+        large = sum(1 for p in powers if p >= 100000)
         print(f"\nClassification:")
-        print(f"  Micro (<100 kW): {micro} sites")
-        print(f"  Mini (100-1000 kW): {mini} sites")
-        print(f"  Small (>1000 kW): {small} sites")
+        print(f"  Pico (<5 kW): {pico} sites")
+        print(f"  Micro (5-100 kW): {micro} sites")
+        print(f"  Mini (100 kW - 1 MW): {mini} sites")
+        print(f"  Small (1-25 MW): {small} sites")
+        print(f"  Medium (25-100 MW): {medium} sites")
+        print(f"  Large (>100 MW): {large} sites")
 
 
 def main():
