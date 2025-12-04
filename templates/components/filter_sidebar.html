@@ -160,11 +160,32 @@
                     <label class="form-label fw-semibold mb-0">
                         <i class="bi bi-layers text-primary"></i> Processing Layers
                     </label>
-                    <button type="button" class="btn btn-sm btn-outline-secondary" id="refreshLayersBtn" title="Refresh layers">
+                    <button type="button" class="btn btn-sm btn-secondary" id="refreshLayersBtn" title="Refresh layers" style="font-size: 0.875rem; padding: 0.25rem 0.5rem;">
                         <i class="bi bi-arrow-clockwise"></i>
                     </button>
                 </div>
                 <small class="text-muted d-block mb-2">Show/hide processing outputs</small>
+                
+                <!-- Flow Direction Info Tooltip (Hidden by default, shown when Flow Direction is toggled) -->
+                <div id="flowDirectionInfo" class="alert alert-info mt-2 mb-2 p-2" style="display: none; font-size: 0.75rem;">
+                    <div class="d-flex align-items-start">
+                        <i class="bi bi-info-circle-fill me-2 mt-1"></i>
+                        <div>
+                            <strong>Flow Direction Colors:</strong>
+                            <div class="d-flex flex-wrap gap-1 mt-1">
+                                <span class="badge" style="background: #ff0000;">E</span>
+                                <span class="badge" style="background: #ff7f00;">SE</span>
+                                <span class="badge" style="background: #ffff00; color: #000;">S</span>
+                                <span class="badge" style="background: #7fff00; color: #000;">SW</span>
+                                <span class="badge" style="background: #00ff00; color: #000;">W</span>
+                                <span class="badge" style="background: #00ffff; color: #000;">NW</span>
+                                <span class="badge" style="background: #007fff;">N</span>
+                                <span class="badge" style="background: #7f00ff;">NE</span>
+                            </div>
+                            <small class="text-muted">Each color shows the direction water flows from that cell.</small>
+                        </div>
+                    </div>
+                </div>
                 
                 <div id="processingLayersContainer">
                     <!-- Layer toggles will be dynamically populated -->
@@ -356,11 +377,15 @@ function loadProcessingLayers() {
                 const isRasterLayer = rasterLayers.includes(step.layer_type);
                 
                 // Vector layers that are already loaded
-                const vectorLayers = ['STREAM_VECTOR', 'WATERSHED_VECTOR'];
+                const vectorLayers = ['STREAM_VECTOR', 'WATERSHED_VECTOR', 'SUBBASIN', 'BRIDGE_POI', 'INFRASTRUCTURE'];
                 const isVectorLayer = vectorLayers.includes(step.layer_type);
                 
+                // Site pairing layers (toggle site points)
+                const sitePointLayers = ['SITE_PAIRS', 'DISCHARGE_RASTER', 'SITE_POINTS'];
+                const isSitePointLayer = sitePointLayers.includes(step.layer_type);
+                
                 // Determine if this layer can be toggled
-                const canToggle = isCompleted && (isRasterLayer || (hasLayer && isVectorLayer));
+                const canToggle = isCompleted && (isRasterLayer || (hasLayer && isVectorLayer) || isSitePointLayer);
                 
                 // Only auto-check vector layers that are already on the map
                 const isDefaultChecked = isCompleted && isVectorLayer;
@@ -380,6 +405,26 @@ function loadProcessingLayers() {
                         </label>
                     </div>
                 `;
+                
+                // Add Flow Direction legend info after its toggle
+                if (step.layer_type === 'FLOW_DIRECTION') {
+                    html += `
+                        <div id="flowDirInfo" class="alert alert-info py-2 px-3 mb-2" style="font-size: 0.85rem; display: none;">
+                            <div class="mb-1"><strong>D8 Flow Direction:</strong></div>
+                            <div class="d-flex flex-wrap gap-1 mb-1">
+                                <span class="badge" style="background-color: #ff0000;">E</span>
+                                <span class="badge" style="background-color: #ff7f00;">SE</span>
+                                <span class="badge" style="background-color: #ffff00; color: #000;">S</span>
+                                <span class="badge" style="background-color: #7fff00;">SW</span>
+                                <span class="badge" style="background-color: #00ff00;">W</span>
+                                <span class="badge" style="background-color: #00ffff; color: #000;">NW</span>
+                                <span class="badge" style="background-color: #007fff;">N</span>
+                                <span class="badge" style="background-color: #7f00ff;">NE</span>
+                            </div>
+                            <small>Each color shows the direction water flows from that cell.</small>
+                        </div>
+                    `;
+                }
             });
             
             html += '</div>';
@@ -425,11 +470,28 @@ function loadProcessingLayers() {
 
 // Toggle processing layer visibility
 function toggleProcessingLayer(layerType, isVisible) {
+    // Show/hide Flow Direction info tooltip in sidebar
+    const flowDirInfo = document.getElementById('flowDirInfo');
+    if (layerType === 'FLOW_DIRECTION' && flowDirInfo) {
+        flowDirInfo.style.display = isVisible ? 'block' : 'none';
+    }
+    
+    // Show/hide Flow Direction legend in map legend panel
+    const flowDirLegend = document.getElementById('flowDirectionLegend');
+    if (layerType === 'FLOW_DIRECTION' && flowDirLegend) {
+        flowDirLegend.style.display = isVisible ? 'block' : 'none';
+    }
+    
     // Map layer types to overlay layer names
     const vectorLayerMapping = {
         'STREAM_VECTOR': 'Stream Network',
         'WATERSHED_VECTOR': 'Watersheds',
-        'SITE_PAIRS': 'Site Pairs (Lines)'
+        'SUBBASIN': 'Subbasins',
+        'BRIDGE_POI': 'Bridges/POIs',
+        'INFRASTRUCTURE': 'Infrastructure',  // Match the actual overlayLayers key
+        'SITE_PAIRS': 'Site Pairs (Lines)',  // Toggle connecting lines for site pairing
+        'DISCHARGE_RASTER': 'Site Points (Inlet/Outlet)',  // Toggle site points for discharge
+        'SITE_POINTS': 'Site Points (Inlet/Outlet)'  // Toggle site points directly
     };
     
     // Raster layers served as tiles
@@ -467,15 +529,15 @@ function toggleProcessingLayer(layerType, isVisible) {
                     attribution: 'Processing Layer'
                 });
                 
-                // Add to layer control
-                const displayNames = {
-                    'FILLED_DEM': 'Filled DEM (Sink Fill)',
-                    'FLOW_DIRECTION': 'Flow Direction (D8)',
-                    'FLOW_ACCUMULATION': 'Flow Accumulation'
-                };
-                if (window.layerControl) {
-                    window.layerControl.addOverlay(overlayLayers[rasterLayerName], displayNames[layerType] || layerType);
-                }
+                // Add to layer control - DISABLED: All layers controlled by Processing Layers sidebar
+                // const displayNames = {
+                //     'FILLED_DEM': 'Filled DEM (Sink Fill)',
+                //     'FLOW_DIRECTION': 'Flow Direction (D8)',
+                //     'FLOW_ACCUMULATION': 'Flow Accumulation'
+                // };
+                // if (window.layerControl) {
+                //     window.layerControl.addOverlay(overlayLayers[rasterLayerName], displayNames[layerType] || layerType);
+                // }
             }
             map.addLayer(overlayLayers[rasterLayerName]);
             console.log(`Raster layer ${rasterLayerKey}: shown`);

@@ -357,6 +357,45 @@
             </div>
         </div>
         
+        <!-- Flow Direction Legend (Hidden by default, shown when Flow Direction layer is active) -->
+        <div class="legend-section mb-3" id="flowDirectionLegend" style="display: none;">
+            <small class="text-muted fw-semibold d-block mb-2">Flow Direction (D8)</small>
+            <div class="d-flex flex-wrap gap-2">
+                <div class="d-flex align-items-center" style="min-width: 45%;">
+                    <div class="legend-color" style="background: #ff0000; width: 24px; height: 16px;"></div>
+                    <small class="ms-1">East</small>
+                </div>
+                <div class="d-flex align-items-center" style="min-width: 45%;">
+                    <div class="legend-color" style="background: #ff7f00; width: 24px; height: 16px;"></div>
+                    <small class="ms-1">Southeast</small>
+                </div>
+                <div class="d-flex align-items-center" style="min-width: 45%;">
+                    <div class="legend-color" style="background: #ffff00; width: 24px; height: 16px;"></div>
+                    <small class="ms-1">South</small>
+                </div>
+                <div class="d-flex align-items-center" style="min-width: 45%;">
+                    <div class="legend-color" style="background: #7fff00; width: 24px; height: 16px;"></div>
+                    <small class="ms-1">Southwest</small>
+                </div>
+                <div class="d-flex align-items-center" style="min-width: 45%;">
+                    <div class="legend-color" style="background: #00ff00; width: 24px; height: 16px;"></div>
+                    <small class="ms-1">West</small>
+                </div>
+                <div class="d-flex align-items-center" style="min-width: 45%;">
+                    <div class="legend-color" style="background: #00ffff; width: 24px; height: 16px;"></div>
+                    <small class="ms-1">Northwest</small>
+                </div>
+                <div class="d-flex align-items-center" style="min-width: 45%;">
+                    <div class="legend-color" style="background: #007fff; width: 24px; height: 16px;"></div>
+                    <small class="ms-1">North</small>
+                </div>
+                <div class="d-flex align-items-center" style="min-width: 45%;">
+                    <div class="legend-color" style="background: #7f00ff; width: 24px; height: 16px;"></div>
+                    <small class="ms-1">Northeast</small>
+                </div>
+            </div>
+        </div>
+        
         <div class="legend-section mt-3">
             <small class="text-muted fw-semibold d-block mb-2">Infrastructure</small>
             <div class="legend-item" id="legend-intake">
@@ -525,7 +564,8 @@ function initializeMap() {
     // Don't add marker cluster group to map by default - only show infrastructure
     // map.addLayer(markerClusterGroup);  // Commented out to hide inlet/outlet points
     overlayLayers['Site Points (Inlet/Outlet)'] = markerClusterGroup;
-    window.layerControl.addOverlay(markerClusterGroup, 'Site Points (Inlet/Outlet)');
+    // Removed from layer control - now controlled by Processing Layers sidebar
+    // window.layerControl.addOverlay(markerClusterGroup, 'Site Points (Inlet/Outlet)');
     
     // Add scale control
     L.control.scale({
@@ -575,7 +615,7 @@ function loadMapData() {
         updateResultCount(getSiteCount(), false); // No animation on initial load
         
         // Apply initial opacity values from sidebar sliders
-        applyInitialOpacity();
+        // applyInitialOpacity(); // DISABLED: Opacity sliders removed from UI
         
         // Update legend with actual counts
         updateLegendCounts();
@@ -921,7 +961,8 @@ function renderInfrastructure(geojson) {
     
     overlayLayers['Infrastructure'] = infrastructureLayer;
     infrastructureLayer.addTo(map);
-    window.layerControl.addOverlay(infrastructureLayer, 'Infrastructure (Top 5 Sites)');
+    // Removed from layer control - now controlled by Processing Layers sidebar
+    // window.layerControl.addOverlay(infrastructureLayer, 'Infrastructure (Top 5 Sites)');
     
     console.log(`Rendered infrastructure layer with ${geojson.features.length} components`);
 }
@@ -941,7 +982,7 @@ function loadStreamNetwork() {
                     return {
                         color: colors[Math.min(order - 1, colors.length - 1)],
                         weight: widths[Math.min(order - 1, widths.length - 1)],
-                        opacity: 0.7
+                        opacity: 0.9
                     };
                 },
                 onEachFeature: function(feature, layer) {
@@ -975,13 +1016,15 @@ function loadStreamNetwork() {
             
             overlayLayers['Stream Network'] = streamLayer;
             streamLayer.addTo(map);
-            window.layerControl.addOverlay(streamLayer, 'Stream Network');
+            // Removed from layer control - now controlled by Processing Layers sidebar
+            // window.layerControl.addOverlay(streamLayer, 'Stream Network');
             
             // Implement layer generalization - hide low-order streams at low zoom
-            map.on('zoomend', function() {
-                updateStreamVisibility();
-            });
-            updateStreamVisibility(); // Initial call
+            // Zoom-based visibility disabled - show all streams at all zoom levels
+            // map.on('zoomend', function() {
+            //     updateStreamVisibility();
+            // });
+            // updateStreamVisibility(); // Initial call
             
             console.log(`Loaded ${geojson.features.length} stream segments`);
             return geojson.features.length;
@@ -993,28 +1036,29 @@ function loadStreamNetwork() {
 }
 
 // Update stream visibility based on zoom level (layer generalization)
-function updateStreamVisibility() {
-    const zoom = map.getZoom();
-    const streamLayer = overlayLayers['Stream Network'];
-    
-    if (streamLayer) {
-        streamLayer.eachLayer(function(layer) {
-            const order = layer.feature.properties.stream_order;
-            
-            // Show only higher-order streams at low zoom levels
-            if (zoom < 12) {
-                // Zoom < 12: Show only order 4-5
-                layer.setStyle({ opacity: order >= 4 ? 0.7 : 0 });
-            } else if (zoom < 14) {
-                // Zoom 12-13: Show order 3-5
-                layer.setStyle({ opacity: order >= 3 ? 0.7 : 0 });
-            } else {
-                // Zoom >= 14: Show all streams
-                layer.setStyle({ opacity: 0.7 });
-            }
-        });
-    }
-}
+// DISABLED: Show all streams at all zoom levels
+// function updateStreamVisibility() {
+//     const zoom = map.getZoom();
+//     const streamLayer = overlayLayers['Stream Network'];
+//     
+//     if (streamLayer) {
+//         streamLayer.eachLayer(function(layer) {
+//             const order = layer.feature.properties.stream_order;
+//             
+//             // Show only higher-order streams at low zoom levels
+//             if (zoom < 12) {
+//                 // Zoom < 12: Show only order 4-5
+//                 layer.setStyle({ opacity: order >= 4 ? 0.7 : 0 });
+//             } else if (zoom < 14) {
+//                 // Zoom 12-13: Show order 3-5
+//                 layer.setStyle({ opacity: order >= 3 ? 0.7 : 0 });
+//             } else {
+//                 // Zoom >= 14: Show all streams
+//                 layer.setStyle({ opacity: 0.7 });
+//             }
+//         });
+//     }
+// }
 
 // Load watersheds layer
 function loadWatersheds() {
@@ -1051,7 +1095,8 @@ function loadWatersheds() {
             
             overlayLayers['Watersheds'] = watershedLayer;
             watershedLayer.addTo(map);
-            window.layerControl.addOverlay(watershedLayer, 'Watersheds');
+            // Removed from layer control - now controlled by Processing Layers sidebar
+            // window.layerControl.addOverlay(watershedLayer, 'Watersheds');
             
             console.log(`Loaded ${geojson.features.length} watersheds`);
             return geojson.features.length;
@@ -1093,7 +1138,8 @@ function loadSubbasins() {
             
             overlayLayers['Subbasins'] = subbasinLayer;
             subbasinLayer.addTo(map);
-            window.layerControl.addOverlay(subbasinLayer, 'Subbasins');
+            // Removed from layer control - now controlled by Processing Layers sidebar
+            // window.layerControl.addOverlay(subbasinLayer, 'Subbasins');
             
             console.log(`Loaded ${geojson.features.length} subbasins`);
             return geojson.features.length;
@@ -1137,7 +1183,8 @@ function loadBridges() {
             
             overlayLayers['Bridges/POIs'] = bridgeLayer;
             bridgeLayer.addTo(map);
-            window.layerControl.addOverlay(bridgeLayer, 'Bridges/POIs');
+            // Removed from layer control - now controlled by Processing Layers sidebar
+            // window.layerControl.addOverlay(bridgeLayer, 'Bridges/POIs');
             
             console.log(`Loaded ${geojson.features.length} bridges/POIs`);
             return geojson.features.length;

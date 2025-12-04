@@ -705,22 +705,6 @@ def api_processing_status(request):
         processing_steps = [
             {
                 'step': 1,
-                'name': 'DEM Upload',
-                'status': 'completed' if raster.dataset else 'not_started',
-                'has_layer': True if raster.dataset else False,
-                'layer_type': 'DEM',
-                'description': f'DEM loaded: {raster.width}×{raster.height} pixels'
-            },
-            {
-                'step': 2,
-                'name': 'DEM Preprocessing',
-                'status': 'completed' if raster.is_preprocessed else 'not_started',
-                'has_layer': bool(raster.filled_dem_path),
-                'layer_type': 'FILLED_DEM',
-                'description': 'Depression filling, flow direction, flow accumulation'
-            },
-            {
-                'step': 3,
                 'name': 'Flow Direction',
                 'status': 'completed' if raster.flow_direction_path else 'not_started',
                 'has_layer': bool(raster.flow_direction_path),
@@ -728,7 +712,7 @@ def api_processing_status(request):
                 'description': 'D8 flow direction raster'
             },
             {
-                'step': 4,
+                'step': 2,
                 'name': 'Flow Accumulation',
                 'status': 'completed' if raster.flow_accumulation_path else 'not_started',
                 'has_layer': bool(raster.flow_accumulation_path),
@@ -736,7 +720,7 @@ def api_processing_status(request):
                 'description': 'Upstream contributing area (cells)'
             },
             {
-                'step': 5,
+                'step': 3,
                 'name': 'Stream Network',
                 'status': 'completed' if raster.stream_count > 0 else 'not_started',
                 'has_layer': raster.stream_count > 0,
@@ -745,13 +729,29 @@ def api_processing_status(request):
                 'description': f'{raster.stream_count} stream segments extracted'
             },
             {
-                'step': 6,
+                'step': 4,
                 'name': 'Watershed Delineation',
                 'status': 'completed' if raster.watershed_delineated else 'not_started',
                 'has_layer': raster.watershed_count > 0,
                 'layer_type': 'WATERSHED_VECTOR',
                 'count': raster.watershed_count,
                 'description': f'{raster.watershed_count} watersheds delineated'
+            },
+            {
+                'step': 5,
+                'name': 'Subbasins',
+                'status': 'completed',
+                'has_layer': True,
+                'layer_type': 'SUBBASIN',
+                'description': 'HEC-HMS subbasin boundaries'
+            },
+            {
+                'step': 6,
+                'name': 'Bridges/POIs',
+                'status': 'completed',
+                'has_layer': True,
+                'layer_type': 'BRIDGE_POI',
+                'description': 'Bridge locations and points of interest'
             },
             {
                 'step': 7,
@@ -764,6 +764,14 @@ def api_processing_status(request):
             },
             {
                 'step': 8,
+                'name': 'Infrastructure',
+                'status': 'completed' if raster.site_pair_count > 0 else 'not_started',
+                'has_layer': raster.site_pair_count > 0,
+                'layer_type': 'INFRASTRUCTURE',
+                'description': 'Run-of-river hydropower infrastructure layout'
+            },
+            {
+                'step': 9,
                 'name': 'Discharge Calculation',
                 'status': 'completed' if raster.discharge_computed else 'not_started',
                 'has_layer': bool(raster.discharge_raster_path),
