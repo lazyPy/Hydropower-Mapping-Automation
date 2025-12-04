@@ -154,6 +154,37 @@
                 }
             </style>
             
+            <!-- Processing Layers Section (HEC-HMS style) -->
+            <div class="mb-4">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <label class="form-label fw-semibold mb-0">
+                        <i class="bi bi-layers text-primary"></i> Processing Layers
+                    </label>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" id="refreshLayersBtn" title="Refresh layers">
+                        <i class="bi bi-arrow-clockwise"></i>
+                    </button>
+                </div>
+                <small class="text-muted d-block mb-2">Show/hide processing outputs</small>
+                
+                <div id="processingLayersContainer">
+                    <!-- Layer toggles will be dynamically populated -->
+                    <div class="text-center text-muted py-2" id="layersLoadingPlaceholder">
+                        <small>Loading layers...</small>
+                    </div>
+                </div>
+                
+                <!-- Processing Status Indicator -->
+                <div class="mt-2 p-2 bg-light rounded" id="processingStatusContainer" style="display: none;">
+                    <small class="text-muted d-flex align-items-center">
+                        <i class="bi bi-check-circle-fill text-success me-1"></i>
+                        <span id="processingStatusText">Processing complete</span>
+                    </small>
+                    <div class="progress mt-1" style="height: 5px;">
+                        <div class="progress-bar bg-success" id="processingProgressBar" role="progressbar" style="width: 100%"></div>
+                    </div>
+                </div>
+            </div>
+            
             <!-- Action Buttons -->
             <div class="d-grid gap-2">
                 <button type="submit" class="btn btn-primary">
@@ -256,5 +287,208 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     });
     
+    // Load processing layers status
+    loadProcessingLayers();
+    
+    // Refresh layers button
+    const refreshLayersBtn = document.getElementById('refreshLayersBtn');
+    if (refreshLayersBtn) {
+        refreshLayersBtn.addEventListener('click', function() {
+            loadProcessingLayers();
+        });
+    }
+    
 });
+
+// Load and display processing layers from API
+function loadProcessingLayers() {
+    const container = document.getElementById('processingLayersContainer');
+    const statusContainer = document.getElementById('processingStatusContainer');
+    const statusText = document.getElementById('processingStatusText');
+    const progressBar = document.getElementById('processingProgressBar');
+    
+    if (!container) return;
+    
+    // Show loading
+    container.innerHTML = '<div class="text-center text-muted py-2"><small>Loading layers...</small></div>';
+    
+    fetch('/api/processing-status/')
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'no_data') {
+                container.innerHTML = '<div class="text-center text-muted py-2"><small>No DEM loaded. Upload data to begin.</small></div>';
+                return;
+            }
+            
+            // Build layer toggles HTML
+            let html = '<div class="processing-layers-list">';
+            
+            const layerIcons = {
+                'DEM': 'bi-image',
+                'FILLED_DEM': 'bi-image-fill',
+                'FLOW_DIRECTION': 'bi-arrows-move',
+                'FLOW_ACCUMULATION': 'bi-water',
+                'STREAM_VECTOR': 'bi-tsunami',
+                'WATERSHED_VECTOR': 'bi-hexagon',
+                'SITE_PAIRS': 'bi-pin-map-fill',
+                'DISCHARGE_RASTER': 'bi-speedometer2'
+            };
+            
+            const layerColors = {
+                'DEM': '#6b7280',
+                'FILLED_DEM': '#8b5cf6',
+                'FLOW_DIRECTION': '#22c55e',
+                'FLOW_ACCUMULATION': '#3b82f6',
+                'STREAM_VECTOR': '#0ea5e9',
+                'WATERSHED_VECTOR': '#6366f1',
+                'SITE_PAIRS': '#f59e0b',
+                'DISCHARGE_RASTER': '#06b6d4'
+            };
+            
+            data.processing_steps.forEach((step, idx) => {
+                const icon = layerIcons[step.layer_type] || 'bi-layers';
+                const color = layerColors[step.layer_type] || '#6b7280';
+                const isCompleted = step.status === 'completed';
+                const hasLayer = step.has_layer;
+                
+                // Raster layers that can be visualized as tiles
+                const rasterLayers = ['FILLED_DEM', 'FLOW_DIRECTION', 'FLOW_ACCUMULATION'];
+                const isRasterLayer = rasterLayers.includes(step.layer_type);
+                
+                // Vector layers that are already loaded
+                const vectorLayers = ['STREAM_VECTOR', 'WATERSHED_VECTOR'];
+                const isVectorLayer = vectorLayers.includes(step.layer_type);
+                
+                // Determine if this layer can be toggled
+                const canToggle = isCompleted && (isRasterLayer || (hasLayer && isVectorLayer));
+                
+                // Only auto-check vector layers that are already on the map
+                const isDefaultChecked = isCompleted && isVectorLayer;
+                
+                html += `
+                    <div class="form-check form-switch mb-2 processing-layer-item ${!isCompleted ? 'opacity-50' : ''}">
+                        <input class="form-check-input" type="checkbox" 
+                               id="procLayer${idx}" 
+                               data-layer-type="${step.layer_type}"
+                               ${canToggle ? '' : 'disabled'}
+                               ${isDefaultChecked ? 'checked' : ''}>
+                        <label class="form-check-label d-flex align-items-center" for="procLayer${idx}">
+                            <i class="bi ${icon} me-2" style="color: ${color}"></i>
+                            <span class="flex-grow-1">${step.name}</span>
+                            ${isCompleted ? '<i class="bi bi-check-circle-fill text-success ms-1" style="font-size: 0.75rem;"></i>' : 
+                              '<i class="bi bi-clock text-muted ms-1" style="font-size: 0.75rem;"></i>'}
+                        </label>
+                    </div>
+                `;
+            });
+            
+            html += '</div>';
+            container.innerHTML = html;
+            
+            // Update processing status
+            if (statusContainer) {
+                statusContainer.style.display = 'block';
+                const progress = data.overall_progress || 0;
+                progressBar.style.width = progress + '%';
+                
+                if (progress === 100) {
+                    statusText.textContent = 'All processing complete';
+                    progressBar.classList.remove('bg-primary');
+                    progressBar.classList.add('bg-success');
+                } else {
+                    statusText.textContent = `Processing: ${progress.toFixed(0)}% complete`;
+                    progressBar.classList.remove('bg-success');
+                    progressBar.classList.add('bg-primary');
+                }
+            }
+            
+            // Add event listeners to layer toggles
+            container.querySelectorAll('.form-check-input').forEach(input => {
+                input.addEventListener('change', function() {
+                    const layerType = this.dataset.layerType;
+                    const isChecked = this.checked;
+                    
+                    // Toggle layer visibility based on type
+                    if (typeof toggleProcessingLayer === 'function') {
+                        toggleProcessingLayer(layerType, isChecked);
+                    } else {
+                        console.log(`Toggle ${layerType}: ${isChecked}`);
+                    }
+                });
+            });
+        })
+        .catch(error => {
+            console.error('Error loading processing layers:', error);
+            container.innerHTML = '<div class="text-center text-danger py-2"><small>Error loading layers</small></div>';
+        });
+}
+
+// Toggle processing layer visibility
+function toggleProcessingLayer(layerType, isVisible) {
+    // Map layer types to overlay layer names
+    const vectorLayerMapping = {
+        'STREAM_VECTOR': 'Stream Network',
+        'WATERSHED_VECTOR': 'Watersheds',
+        'SITE_PAIRS': 'Site Pairs (Lines)'
+    };
+    
+    // Raster layers served as tiles
+    const rasterLayerMapping = {
+        'FILLED_DEM': 'filled_dem',
+        'FLOW_DIRECTION': 'flow_direction',
+        'FLOW_ACCUMULATION': 'flow_accumulation'
+    };
+    
+    // Handle vector layers (existing functionality)
+    const vectorLayerName = vectorLayerMapping[layerType];
+    if (vectorLayerName && typeof overlayLayers !== 'undefined' && overlayLayers[vectorLayerName]) {
+        if (isVisible) {
+            map.addLayer(overlayLayers[vectorLayerName]);
+        } else {
+            map.removeLayer(overlayLayers[vectorLayerName]);
+        }
+        console.log(`Layer ${vectorLayerName}: ${isVisible ? 'shown' : 'hidden'}`);
+        return;
+    }
+    
+    // Handle raster tile layers
+    const rasterLayerKey = rasterLayerMapping[layerType];
+    if (rasterLayerKey) {
+        const rasterLayerName = layerType + '_RASTER';
+        
+        if (isVisible) {
+            // Create tile layer if it doesn't exist
+            if (!overlayLayers[rasterLayerName]) {
+                const tileUrl = `/api/tiles/${rasterLayerKey}/{z}/{x}/{y}.png`;
+                overlayLayers[rasterLayerName] = L.tileLayer(tileUrl, {
+                    opacity: 0.7,
+                    maxZoom: 18,
+                    tms: false,
+                    attribution: 'Processing Layer'
+                });
+                
+                // Add to layer control
+                const displayNames = {
+                    'FILLED_DEM': 'Filled DEM (Sink Fill)',
+                    'FLOW_DIRECTION': 'Flow Direction (D8)',
+                    'FLOW_ACCUMULATION': 'Flow Accumulation'
+                };
+                if (window.layerControl) {
+                    window.layerControl.addOverlay(overlayLayers[rasterLayerName], displayNames[layerType] || layerType);
+                }
+            }
+            map.addLayer(overlayLayers[rasterLayerName]);
+            console.log(`Raster layer ${rasterLayerKey}: shown`);
+        } else {
+            if (overlayLayers[rasterLayerName]) {
+                map.removeLayer(overlayLayers[rasterLayerName]);
+                console.log(`Raster layer ${rasterLayerKey}: hidden`);
+            }
+        }
+        return;
+    }
+    
+    console.log(`Layer type ${layerType} not mapped to any layer`);
+}
 </script>
+

@@ -215,6 +215,7 @@ class InletOutletPairing:
         self.stream_nodes = None
         self.stream_graph = None  # NetworkX graph for connectivity
         self.node_spatial_index = None  # KDTree for spatial queries
+        self.stream_spatial_index = None  # STRtree for stream distance queries
         self.watershed_polygons = None  # Watershed polygons from database
         self.watershed_gdf = None  # GeoDataFrame of watershed polygons for spatial queries
         
@@ -432,11 +433,18 @@ class InletOutletPairing:
         logger.info(f"Calculated stream orders: range {self.stream_network['stream_order'].min():.0f} - {self.stream_network['stream_order'].max():.0f}")
     
     def _build_spatial_index(self):
-        """Build KDTree spatial index for fast nearest neighbor queries"""
+        """Build spatial indexes for fast queries"""
+        # Build KDTree for stream nodes
         if self.stream_nodes is not None:
             coords = np.array([[node.geometry.x, node.geometry.y] for _, node in self.stream_nodes.iterrows()])
             self.node_spatial_index = cKDTree(coords)
-            logger.info(f"Built spatial index with {len(coords)} nodes")
+            logger.info(f"Built node spatial index with {len(coords)} nodes")
+        
+        # Build STRtree spatial index for stream geometries (for distance queries)
+        if self.stream_network is not None and len(self.stream_network) > 0:
+            from shapely import STRtree
+            self.stream_spatial_index = STRtree(self.stream_network.geometry.values)
+            logger.info(f"Built stream spatial index with {len(self.stream_network)} segments")
     
     def _is_within_watershed(self, point: Point) -> bool:
         """
@@ -1050,10 +1058,17 @@ class InletOutletPairing:
         return True
     
     def _distance_to_nearest_stream(self, point: Point) -> float:
-        """Calculate distance from point to nearest stream segment"""
+        """Calculate distance from point to nearest stream segment using spatial index"""
         if self.stream_network is None or len(self.stream_network) == 0:
             return 0.0  # Assume valid if no stream network
         
+        # Use STRtree spatial index for fast nearest neighbor query
+        if self.stream_spatial_index is not None:
+            nearest_idx = self.stream_spatial_index.nearest(point)
+            nearest_geom = self.stream_network.geometry.iloc[nearest_idx]
+            return point.distance(nearest_geom)
+        
+        # Fallback to brute force (should not happen)
         min_dist = float('inf')
         for _, stream in self.stream_network.iterrows():
             dist = point.distance(stream.geometry)

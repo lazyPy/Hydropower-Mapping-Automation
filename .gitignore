@@ -1,6 +1,11 @@
 env/
 docs/
 
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
 # Large data files
 INPUT DATA - Claveria/
 media/preprocessed/

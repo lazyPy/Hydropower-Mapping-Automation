@@ -184,16 +184,18 @@ class DEMPreprocessor:
                 'error': str(e)
             }
     
-    def compute_flow_accumulation(self, input_flow_dir: str, output_flow_accum: str,
+    def compute_flow_accumulation(self, input_dem: str, output_flow_accum: str,
                                    log_transform: bool = False) -> Dict[str, Any]:
         """
-        Compute flow accumulation from D8 flow direction.
+        Compute flow accumulation directly from DEM.
         
         Flow accumulation represents the number of upslope cells that drain
-        through each cell.
+        through each cell. This method computes flow accumulation directly from
+        the hydrologically conditioned (filled/breached) DEM, which internally
+        computes flow directions.
         
         Args:
-            input_flow_dir: Path to D8 flow direction raster
+            input_dem: Path to hydrologically conditioned DEM (filled or breached)
             output_flow_accum: Path to output flow accumulation raster
             log_transform: Whether to apply log transformation for visualization
             
@@ -201,11 +203,13 @@ class DEMPreprocessor:
             Dictionary with processing metadata
         """
         try:
-            # Compute flow accumulation
+            # Compute flow accumulation directly from DEM (pntr=False)
+            # This is more reliable than using a separate flow pointer raster
             self.wbt.d8_flow_accumulation(
-                i=input_flow_dir,
+                i=input_dem,
                 output=output_flow_accum,
                 out_type='cells',  # Output in number of cells (or 'catchment area', 'specific contributing area')
+                pntr=False,  # Input is a DEM, not a D8 pointer raster
                 log=log_transform,
                 clip=False
             )
@@ -357,9 +361,9 @@ class DEMPreprocessor:
                 results['errors'].append(f"Flow direction failed: {result.get('error')}")
                 return results
             
-            # Step 4: Compute flow accumulation
+            # Step 4: Compute flow accumulation (directly from conditioned DEM)
             flow_accum_path = os.path.join(base_dir, f"{output_prefix}_flow_accumulation.tif")
-            result = self.compute_flow_accumulation(flow_dir_path, flow_accum_path)
+            result = self.compute_flow_accumulation(conditioned_path, flow_accum_path)
             if result['success']:
                 results['outputs']['flow_accumulation'] = flow_accum_path
             else:

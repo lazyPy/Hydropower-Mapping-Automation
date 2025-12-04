@@ -343,9 +343,9 @@ class DataProcessor:
                 raise Exception(f"Flow direction failed: {flow_dir_result.get('error')}")
             self.console.success("Flow direction computed")
             
-            # 3. Compute flow accumulation
+            # 3. Compute flow accumulation (directly from filled DEM for reliability)
             self.console.info("Computing flow accumulation...")
-            flow_accum_result = preprocessor.compute_flow_accumulation(flow_dir_path, flow_accum_path)
+            flow_accum_result = preprocessor.compute_flow_accumulation(filled_path, flow_accum_path)
             if not flow_accum_result.get('success'):
                 raise Exception(f"Flow accumulation failed: {flow_accum_result.get('error')}")
             self.console.success("Flow accumulation computed")
@@ -983,92 +983,100 @@ class DataProcessor:
             return False
     
     def associate_discharge_and_power(self, raster: RasterLayer) -> bool:
-        """Step 9: Associate discharge data with site pairs and calculate power"""
-        self.console.step("Associating Discharge & Calculating Power")
+        """Step 9: Associate discharge data with site pairs and calculate power
+        
+        UPDATED: Now uses spatially-varying discharge based on drainage area (flow accumulation).
+        Each site gets a unique discharge value proportional to its upstream contributing area.
+        
+        Formula: Q_site = Q_outlet × (A_site / A_outlet)
+        Where A is approximated by flow accumulation values.
+        """
+        self.console.step("Associating Spatially-Varying Discharge & Calculating Power")
         
         try:
             # Check if we have HMS data
             hms_run = HMSRun.objects.first()
             if not hms_run:
-                self.console.warning("No HMS data available. Power will not be calculated.")
-                return True
-            
-            # Get site pairs for this raster layer
-            site_pairs = SitePair.objects.filter(raster_layer=raster)
-            if not site_pairs.exists():
-                self.console.warning("No site pairs to process.")
-                return True
-            
-            self.console.info(f"Processing {site_pairs.count()} site pairs...")
-            
-            # Clean invalid discharge values (IEEE float nodata)
-            invalid_ts = TimeSeries.objects.filter(value__lt=-1e30)
-            if invalid_ts.exists():
-                count = invalid_ts.count()
-                invalid_ts.delete()
-                self.console.info(f"Cleaned {count} invalid discharge records")
-            
-            # Get representative discharge (peak from HMS)
-            from django.db.models import Max
-            peak_data = TimeSeries.objects.filter(
-                dataset=hms_run.dataset,
-                data_type='DISCHARGE',
-                value__gt=0
-            ).aggregate(peak=Max('value'))
-            
-            representative_q = peak_data.get('peak', 0)
-            if not representative_q or representative_q <= 0:
-                self.console.warning("No valid discharge data found. Using default Q=10 m³/s")
-                representative_q = 10.0  # Default fallback
-            
-            self.console.info(f"Representative discharge: {representative_q:.2f} m³/s")
-            
-            # Constants for power calculation
-            RHO = 1000.0  # Water density kg/m³
-            G = 9.81      # Gravity m/s²
-            
-            updated = 0
-            for site_pair in site_pairs:
-                # Assign discharge
-                site_pair.discharge = representative_q
-                site_pair.hms_run = hms_run
+                self.console.warning("No HMS data available. Using default Q_outlet=10 m³/s")
+                q_outlet = 10.0
+            else:
+                # Get representative discharge (peak from HMS) - this is Q at basin outlet
+                from django.db.models import Max
                 
-                # Calculate net head (with losses if penstock exists)
-                gross_head = site_pair.head
-                if site_pair.penstock_length and site_pair.penstock_length > 0:
-                    from hydropower.site_pairing import calculate_head_losses
-                    losses = calculate_head_losses(
-                        site_pair.discharge,
-                        site_pair.penstock_length,
-                        gross_head
-                    )
-                    net_head = gross_head - losses.get('total_head_loss', 0)
-                else:
-                    net_head = gross_head
+                # Clean invalid discharge values (IEEE float nodata)
+                invalid_ts = TimeSeries.objects.filter(value__lt=-1e30)
+                if invalid_ts.exists():
+                    count = invalid_ts.count()
+                    invalid_ts.delete()
+                    self.console.info(f"Cleaned {count} invalid discharge records")
                 
-                # Calculate power: P = ρ × g × Q × H × η
-                efficiency = site_pair.efficiency or 0.7
-                power = RHO * G * site_pair.discharge * net_head * efficiency / 1000  # kW
+                peak_data = TimeSeries.objects.filter(
+                    dataset=hms_run.dataset,
+                    data_type='DISCHARGE',
+                    value__gt=0
+                ).aggregate(peak=Max('value'))
                 
-                site_pair.power = max(0, power)  # Ensure non-negative
-                site_pair.save(update_fields=['discharge', 'power', 'hms_run'])
-                updated += 1
+                q_outlet = peak_data.get('peak', 0)
+                if not q_outlet or q_outlet <= 0:
+                    self.console.warning("No valid HMS discharge. Using default Q_outlet=10 m³/s")
+                    q_outlet = 10.0
             
-            self.console.success(f"Updated {updated} site pairs with discharge and power")
+            self.console.info(f"Reference Q_outlet (basin outlet): {q_outlet:.2f} m³/s")
             
-            # Show power summary
-            from django.db.models import Min, Max as DjMax, Avg, Sum
-            power_stats = site_pairs.aggregate(
-                min_p=Min('power'),
-                max_p=DjMax('power'),
-                avg_p=Avg('power'),
-                total_p=Sum('power')
-            )
+            # Check if flow accumulation is available for spatial discharge calculation
+            if not raster.flow_accumulation_path:
+                self.console.warning("Flow accumulation not available. Using uniform discharge.")
+                return self._associate_uniform_discharge(raster, q_outlet, hms_run)
             
-            self.console.info(f"\nPower Output Summary:")
-            self.console.info(f"  Range: {power_stats['min_p']:.1f} - {power_stats['max_p']:.1f} kW")
-            self.console.info(f"  Average: {power_stats['avg_p']:.1f} kW")
-            self.console.info(f"  Total potential: {power_stats['total_p']:.1f} kW ({power_stats['total_p']/1000:.2f} MW)")
+            # Use spatially-varying discharge calculation
+            self.console.info("Calculating spatially-varying discharge based on drainage area...")
+            
+            from hydropower.spatial_discharge import update_site_pair_discharge_spatial, generate_discharge_raster
+            
+            # Update site pairs with spatial discharge
+            stats = update_site_pair_discharge_spatial(raster, q_outlet)
+            
+            if 'error' in stats:
+                self.console.error(f"Spatial discharge calculation failed: {stats['error']}")
+                self.console.info("Falling back to uniform discharge...")
+                return self._associate_uniform_discharge(raster, q_outlet, hms_run)
+            
+            # Generate discharge raster for visualization
+            try:
+                discharge_raster_path = generate_discharge_raster(raster, q_outlet)
+                
+                # Update raster layer with discharge info
+                raster.discharge_raster_path = str(Path(discharge_raster_path).relative_to(settings.MEDIA_ROOT))
+                raster.discharge_computed = True
+                raster.discharge_q_outlet = q_outlet
+                raster.discharge_computation_date = timezone.now()
+                raster.save()
+                
+                self.console.success(f"Generated discharge raster: {discharge_raster_path}")
+            except Exception as e:
+                self.console.warning(f"Could not generate discharge raster: {e}")
+            
+            # Show results
+            self.console.success(f"Updated {stats['updated']}/{stats['total']} site pairs with spatially-varying discharge")
+            
+            if stats.get('discharge_min') is not None:
+                self.console.info(f"\nDischarge Statistics (Spatially Varying):")
+                self.console.info(f"  Q_outlet (reference): {q_outlet:.2f} m³/s")
+                self.console.info(f"  Q_min (smallest site): {stats['discharge_min']:.4f} m³/s")
+                self.console.info(f"  Q_max (largest site): {stats['discharge_max']:.2f} m³/s")
+                self.console.info(f"  Q_mean: {stats['discharge_mean']:.3f} m³/s")
+                self.console.info(f"  Basin area: {stats.get('basin_area_km2', 'N/A'):.2f} km²")
+            
+            if stats.get('power_min') is not None:
+                self.console.info(f"\nPower Output Statistics:")
+                self.console.info(f"  P_min: {stats['power_min']:.2f} kW")
+                self.console.info(f"  P_max: {stats['power_max']:.2f} kW")
+                self.console.info(f"  P_mean: {stats['power_mean']:.2f} kW")
+                self.console.info(f"  Total potential: {stats['power_total']:.2f} kW ({stats['power_total']/1000:.3f} MW)")
+            
+            # Update HMS run link for site pairs
+            if hms_run:
+                SitePair.objects.filter(raster_layer=raster).update(hms_run=hms_run)
             
             return True
             
@@ -1077,6 +1085,61 @@ class DataProcessor:
             import traceback
             traceback.print_exc()
             return True  # Non-critical, continue anyway
+    
+    def _associate_uniform_discharge(self, raster: RasterLayer, q_outlet: float, hms_run=None) -> bool:
+        """Fallback method: Assign uniform discharge to all site pairs (legacy behavior)"""
+        from hydropower.site_pairing import calculate_head_losses
+        
+        site_pairs = SitePair.objects.filter(raster_layer=raster)
+        if not site_pairs.exists():
+            self.console.warning("No site pairs to process.")
+            return True
+        
+        self.console.info(f"Using uniform discharge: {q_outlet:.2f} m³/s for all {site_pairs.count()} sites")
+        
+        RHO = 1000.0
+        G = 9.81
+        
+        updated = 0
+        for site_pair in site_pairs:
+            site_pair.discharge = q_outlet
+            if hms_run:
+                site_pair.hms_run = hms_run
+            
+            gross_head = site_pair.head
+            if site_pair.penstock_length and site_pair.penstock_length > 0:
+                losses = calculate_head_losses(
+                    site_pair.discharge,
+                    site_pair.penstock_length,
+                    gross_head
+                )
+                net_head = gross_head - losses.get('total_head_loss', 0)
+            else:
+                net_head = gross_head
+            
+            power = RHO * G * site_pair.discharge * net_head * efficiency / 1000  # kW
+            
+            site_pair.power = max(0, power)  # Ensure non-negative
+            site_pair.save(update_fields=['discharge', 'power', 'hms_run'] if hms_run else ['discharge', 'power'])
+            updated += 1
+        
+        self.console.success(f"Updated {updated} site pairs with uniform discharge and power")
+        
+        # Show power summary
+        from django.db.models import Min, Max as DjMax, Avg, Sum
+        power_stats = site_pairs.aggregate(
+            min_p=Min('power'),
+            max_p=DjMax('power'),
+            avg_p=Avg('power'),
+            total_p=Sum('power')
+        )
+        
+        self.console.info(f"\nPower Output Summary:")
+        self.console.info(f"  Range: {power_stats['min_p']:.1f} - {power_stats['max_p']:.1f} kW")
+        self.console.info(f"  Average: {power_stats['avg_p']:.1f} kW")
+        self.console.info(f"  Total potential: {power_stats['total_p']:.1f} kW ({power_stats['total_p']/1000:.2f} MW)")
+        
+        return True
     
     def load_shapefiles(self, dataset: Dataset) -> bool:
         """Load shapefiles (bridges, subbasins, outlets) and cache as GeoJSON for map display"""

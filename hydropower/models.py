@@ -135,6 +135,12 @@ class RasterLayer(models.Model):
     site_pair_count = models.IntegerField(default=0, help_text="Number of site pairs generated")
     site_pairing_date = models.DateTimeField(null=True, blank=True, help_text="When site pairing was completed")
     
+    # Discharge raster (spatially-varying discharge)
+    discharge_raster_path = models.CharField(max_length=500, blank=True, help_text="Path to discharge raster (m³/s per cell)")
+    discharge_computed = models.BooleanField(default=False, help_text="Whether spatially-varying discharge has been computed")
+    discharge_q_outlet = models.FloatField(null=True, blank=True, help_text="Reference Q at outlet used for discharge calculation (m³/s)")
+    discharge_computation_date = models.DateTimeField(null=True, blank=True, help_text="When discharge was computed")
+    
     class Meta:
         db_table = "raster_layers"
         verbose_name = "Raster Layer"
@@ -742,6 +748,97 @@ class ProcessingRun(models.Model):
         return self.status in ['QUEUED', 'RUNNING']
 
 
+class ProcessingLayer(models.Model):
+    """
+    Model to track intermediate processing outputs for map visualization.
+    
+    This enables HEC-HMS-style layer visualization where users can see outputs
+    from different processing stages (DEM, Flow Direction, Flow Accumulation,
+    Streams, Watersheds, Discharge, etc.)
+    """
+    
+    LAYER_TYPES = [
+        ('DEM', 'Digital Elevation Model'),
+        ('FILLED_DEM', 'Filled DEM (Depressions Removed)'),
+        ('FLOW_DIRECTION', 'Flow Direction (D8)'),
+        ('FLOW_ACCUMULATION', 'Flow Accumulation'),
+        ('STREAM_RASTER', 'Stream Raster'),
+        ('STREAM_VECTOR', 'Stream Network (Vector)'),
+        ('WATERSHED_RASTER', 'Watershed Raster'),
+        ('WATERSHED_VECTOR', 'Watershed Boundaries (Vector)'),
+        ('DISCHARGE_RASTER', 'Discharge (m³/s)'),
+        ('SLOPE', 'Slope (Degrees)'),
+        ('ASPECT', 'Aspect'),
+        ('SUBBASIN', 'Subbasins'),
+        ('SITE_POINTS', 'Site Points (Inlets/Outlets)'),
+        ('SITE_PAIRS', 'Site Pairs'),
+        ('INFRASTRUCTURE', 'Infrastructure Components'),
+        ('CUSTOM', 'Custom Layer'),
+    ]
+    
+    DATA_FORMATS = [
+        ('RASTER', 'Raster (GeoTIFF)'),
+        ('VECTOR', 'Vector (GeoJSON/Shapefile)'),
+        ('POINT', 'Point Features'),
+        ('LINE', 'Line Features'),
+        ('POLYGON', 'Polygon Features'),
+    ]
+    
+    # Link to source raster layer (DEM)
+    raster_layer = models.ForeignKey(
+        RasterLayer,
+        on_delete=models.CASCADE,
+        related_name='processing_layers',
+        help_text="Source DEM/RasterLayer"
+    )
+    
+    # Layer identification
+    name = models.CharField(max_length=200, help_text="Layer display name")
+    layer_type = models.CharField(max_length=30, choices=LAYER_TYPES, help_text="Type of processing layer")
+    data_format = models.CharField(max_length=20, choices=DATA_FORMATS, default='RASTER', help_text="Data format")
+    
+    # File path (relative to MEDIA_ROOT)
+    file_path = models.CharField(max_length=500, help_text="Path to layer file")
+    
+    # Visualization settings (JSON)
+    style = models.JSONField(default=dict, blank=True, help_text="Layer style configuration (colors, opacity, etc.)")
+    
+    # Metadata
+    description = models.TextField(blank=True, help_text="Layer description")
+    processing_step = models.IntegerField(default=0, help_text="Processing step number (for ordering)")
+    is_visible = models.BooleanField(default=True, help_text="Whether layer is visible by default")
+    is_base_layer = models.BooleanField(default=False, help_text="Whether this is a base/background layer")
+    
+    # Statistics (JSON) - for rasters: min, max, mean, etc.
+    statistics = models.JSONField(default=dict, blank=True, help_text="Layer statistics")
+    
+    # Bounds
+    bounds_minx = models.FloatField(null=True, blank=True)
+    bounds_miny = models.FloatField(null=True, blank=True)
+    bounds_maxx = models.FloatField(null=True, blank=True)
+    bounds_maxy = models.FloatField(null=True, blank=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = "processing_layers"
+        verbose_name = "Processing Layer"
+        verbose_name_plural = "Processing Layers"
+        ordering = ['raster_layer', 'processing_step', 'name']
+        unique_together = [['raster_layer', 'layer_type']]
+    
+    def __str__(self):
+        return f"{self.name} ({self.get_layer_type_display()})"
+    
+    def get_absolute_path(self):
+        """Get the absolute file path"""
+        from django.conf import settings
+        from pathlib import Path
+        return Path(settings.MEDIA_ROOT) / self.file_path
+
+
 # Uncomment this model when PostGIS is set up:
 """
 class TestLocation(models.Model):
@@ -758,3 +855,4 @@ class TestLocation(models.Model):
     def __str__(self):
         return self.name
 """
+

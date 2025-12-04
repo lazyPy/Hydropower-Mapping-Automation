@@ -148,7 +148,7 @@ def geojson_site_pairs(request):
                     'id': pair.id,
                     'pair_id': pair.pair_id,
                     'head': round(pair.head, 2),
-                    'discharge': round(pair.discharge, 2) if pair.discharge else None,
+                    'discharge': round(pair.discharge, 6) if pair.discharge else None,
                     'power': round(pair.power, 2) if pair.power else None,
                     'efficiency': pair.efficiency,
                     'river_distance': round(pair.river_distance, 2),
@@ -610,6 +610,458 @@ def geojson_bridges(request):
         
     except Exception as e:
         logger.error(f"Error generating bridges GeoJSON: {str(e)}", exc_info=True)
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+# ============================================================================
+# Processing Layers API - For HEC-HMS-style Layer Visualization
+# ============================================================================
+
+def api_processing_layers(request):
+    """
+    API endpoint to list all available processing layers for map visualization.
+    
+    Returns JSON list of layers with their metadata, enabling HEC-HMS-style
+    layer toggling in the map interface.
+    
+    Query parameters:
+    - raster_layer: Filter by source DEM ID
+    - visible_only: Only return visible layers (default: false)
+    """
+    from .models import ProcessingLayer, RasterLayer
+    
+    try:
+        raster_layer_id = request.GET.get('raster_layer')
+        visible_only = request.GET.get('visible_only', '').lower() == 'true'
+        
+        queryset = ProcessingLayer.objects.all().order_by('processing_step', 'name')
+        
+        if raster_layer_id:
+            queryset = queryset.filter(raster_layer_id=int(raster_layer_id))
+        
+        if visible_only:
+            queryset = queryset.filter(is_visible=True)
+        
+        layers = []
+        for layer in queryset:
+            layers.append({
+                'id': layer.id,
+                'name': layer.name,
+                'layer_type': layer.layer_type,
+                'layer_type_display': layer.get_layer_type_display(),
+                'data_format': layer.data_format,
+                'file_path': layer.file_path,
+                'style': layer.style,
+                'description': layer.description,
+                'processing_step': layer.processing_step,
+                'is_visible': layer.is_visible,
+                'is_base_layer': layer.is_base_layer,
+                'statistics': layer.statistics,
+                'bounds': {
+                    'minx': layer.bounds_minx,
+                    'miny': layer.bounds_miny,
+                    'maxx': layer.bounds_maxx,
+                    'maxy': layer.bounds_maxy
+                } if layer.bounds_minx else None,
+                'raster_layer_id': layer.raster_layer_id,
+                'created_at': layer.created_at.isoformat()
+            })
+        
+        return JsonResponse({
+            'layers': layers,
+            'count': len(layers)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error listing processing layers: {str(e)}", exc_info=True)
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+def api_processing_status(request):
+    """
+    API endpoint to get current processing status and available intermediate outputs.
+    
+    Returns status of each processing step with layer availability,
+    similar to HEC-HMS processing status display.
+    """
+    from .models import RasterLayer, StreamNetwork, WatershedPolygon, SitePair, ProcessingLayer
+    
+    try:
+        # Get latest raster layer (or specific one if provided)
+        raster_layer_id = request.GET.get('raster_layer')
+        
+        if raster_layer_id:
+            raster = RasterLayer.objects.get(id=int(raster_layer_id))
+        else:
+            raster = RasterLayer.objects.order_by('-id').first()
+        
+        if not raster:
+            return JsonResponse({
+                'status': 'no_data',
+                'message': 'No DEM data loaded. Upload a DEM to begin processing.'
+            })
+        
+        # Build processing status
+        processing_steps = [
+            {
+                'step': 1,
+                'name': 'DEM Upload',
+                'status': 'completed' if raster.dataset else 'not_started',
+                'has_layer': True if raster.dataset else False,
+                'layer_type': 'DEM',
+                'description': f'DEM loaded: {raster.width}×{raster.height} pixels'
+            },
+            {
+                'step': 2,
+                'name': 'DEM Preprocessing',
+                'status': 'completed' if raster.is_preprocessed else 'not_started',
+                'has_layer': bool(raster.filled_dem_path),
+                'layer_type': 'FILLED_DEM',
+                'description': 'Depression filling, flow direction, flow accumulation'
+            },
+            {
+                'step': 3,
+                'name': 'Flow Direction',
+                'status': 'completed' if raster.flow_direction_path else 'not_started',
+                'has_layer': bool(raster.flow_direction_path),
+                'layer_type': 'FLOW_DIRECTION',
+                'description': 'D8 flow direction raster'
+            },
+            {
+                'step': 4,
+                'name': 'Flow Accumulation',
+                'status': 'completed' if raster.flow_accumulation_path else 'not_started',
+                'has_layer': bool(raster.flow_accumulation_path),
+                'layer_type': 'FLOW_ACCUMULATION',
+                'description': 'Upstream contributing area (cells)'
+            },
+            {
+                'step': 5,
+                'name': 'Stream Network',
+                'status': 'completed' if raster.stream_count > 0 else 'not_started',
+                'has_layer': raster.stream_count > 0,
+                'layer_type': 'STREAM_VECTOR',
+                'count': raster.stream_count,
+                'description': f'{raster.stream_count} stream segments extracted'
+            },
+            {
+                'step': 6,
+                'name': 'Watershed Delineation',
+                'status': 'completed' if raster.watershed_delineated else 'not_started',
+                'has_layer': raster.watershed_count > 0,
+                'layer_type': 'WATERSHED_VECTOR',
+                'count': raster.watershed_count,
+                'description': f'{raster.watershed_count} watersheds delineated'
+            },
+            {
+                'step': 7,
+                'name': 'Site Pairing',
+                'status': 'completed' if raster.site_pairing_completed else 'not_started',
+                'has_layer': raster.site_pair_count > 0,
+                'layer_type': 'SITE_PAIRS',
+                'count': raster.site_pair_count,
+                'description': f'{raster.site_pair_count} inlet-outlet site pairs'
+            },
+            {
+                'step': 8,
+                'name': 'Discharge Calculation',
+                'status': 'completed' if raster.discharge_computed else 'not_started',
+                'has_layer': bool(raster.discharge_raster_path),
+                'layer_type': 'DISCHARGE_RASTER',
+                'description': f'Spatially-varying discharge (Q_outlet={raster.discharge_q_outlet or "N/A"} m³/s)'
+            },
+        ]
+        
+        # Get available processing layers
+        available_layers = list(ProcessingLayer.objects.filter(
+            raster_layer=raster
+        ).values('id', 'name', 'layer_type', 'is_visible', 'processing_step'))
+        
+        return JsonResponse({
+            'status': 'ok',
+            'raster_layer_id': raster.id,
+            'raster_name': raster.dataset.name if raster.dataset else 'Unknown',
+            'processing_steps': processing_steps,
+            'available_layers': available_layers,
+            'overall_progress': sum(1 for s in processing_steps if s['status'] == 'completed') / len(processing_steps) * 100
+        })
+        
+    except RasterLayer.DoesNotExist:
+        return JsonResponse({'error': 'Raster layer not found'}, status=404)
+    except Exception as e:
+        logger.error(f"Error getting processing status: {str(e)}", exc_info=True)
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+def api_raster_tile(request, layer_type, z, x, y):
+    """
+    Serve raster tiles for intermediate processing layers.
+    
+    This enables visualization of processing steps like HEC-HMS does:
+    - filled_dem: Depression-filled DEM (terrain visualization)
+    - flow_direction: D8 flow direction (arrow colors)
+    - flow_accumulation: Upstream contributing area (blue gradient)
+    
+    URL format: /api/tiles/{layer_type}/{z}/{x}/{y}.png
+    
+    Uses XYZ tile convention (same as OpenStreetMap/Leaflet)
+    """
+    import numpy as np
+    from PIL import Image
+    import io
+    from pathlib import Path
+    import math
+    
+    try:
+        # Get raster layer
+        raster_layer_id = request.GET.get('raster_layer')
+        
+        if raster_layer_id:
+            raster = RasterLayer.objects.get(id=int(raster_layer_id))
+        else:
+            raster = RasterLayer.objects.order_by('-id').first()
+        
+        if not raster:
+            return HttpResponse(status=404)
+        
+        # Get raster path based on layer type
+        layer_paths = {
+            'flow_accumulation': raster.flow_accumulation_path,
+            'filled_dem': raster.filled_dem_path,
+            'flow_direction': raster.flow_direction_path,
+        }
+        
+        raster_path = layer_paths.get(layer_type)
+        
+        if not raster_path:
+            return HttpResponse(status=404)
+        
+        full_path = Path(settings.MEDIA_ROOT) / raster_path
+        
+        if not full_path.exists():
+            return HttpResponse(status=404)
+        
+        # Import rasterio for raster reading
+        try:
+            import rasterio
+            from rasterio.windows import from_bounds
+            from rasterio.enums import Resampling
+            from pyproj import Transformer
+        except ImportError:
+            logger.error("rasterio not installed")
+            return HttpResponse(status=500)
+        
+        # XYZ tile to bounds (Web Mercator EPSG:3857)
+        def tile_bounds(z, x, y):
+            """Convert XYZ tile coordinates to Web Mercator bounds."""
+            n = 2.0 ** z
+            # Web Mercator bounds
+            world_size = 20037508.342789244 * 2
+            tile_size = world_size / n
+            
+            min_x = -20037508.342789244 + x * tile_size
+            max_x = min_x + tile_size
+            max_y = 20037508.342789244 - y * tile_size
+            min_y = max_y - tile_size
+            
+            return min_x, min_y, max_x, max_y
+        
+        # Get tile bounds in Web Mercator
+        bounds_3857 = tile_bounds(z, x, y)
+        
+        with rasterio.open(full_path) as src:
+            # Transform bounds to raster CRS
+            transformer = Transformer.from_crs("EPSG:3857", src.crs, always_xy=True)
+            
+            min_x, min_y = transformer.transform(bounds_3857[0], bounds_3857[1])
+            max_x, max_y = transformer.transform(bounds_3857[2], bounds_3857[3])
+            
+            # Check if tile intersects raster
+            raster_bounds = src.bounds
+            if (max_x < raster_bounds.left or min_x > raster_bounds.right or
+                max_y < raster_bounds.bottom or min_y > raster_bounds.top):
+                # Return transparent tile if no intersection
+                tile = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
+                buffer = io.BytesIO()
+                tile.save(buffer, format='PNG')
+                buffer.seek(0)
+                return HttpResponse(buffer.getvalue(), content_type='image/png')
+            
+            # Clamp bounds to raster extent
+            min_x = max(min_x, raster_bounds.left)
+            max_x = min(max_x, raster_bounds.right)
+            min_y = max(min_y, raster_bounds.bottom)
+            max_y = min(max_y, raster_bounds.top)
+            
+            # Read window
+            try:
+                window = from_bounds(min_x, min_y, max_x, max_y, src.transform)
+                
+                # Read data with resampling to 256x256
+                data = src.read(
+                    1,
+                    window=window,
+                    out_shape=(256, 256),
+                    resampling=Resampling.bilinear
+                )
+            except Exception as e:
+                logger.warning(f"Error reading window: {e}")
+                # Return transparent tile on error
+                tile = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
+                buffer = io.BytesIO()
+                tile.save(buffer, format='PNG')
+                buffer.seek(0)
+                return HttpResponse(buffer.getvalue(), content_type='image/png')
+            
+            # Get nodata value
+            nodata = src.nodata
+            
+            # Create RGBA image based on layer type
+            rgba = np.zeros((256, 256, 4), dtype=np.uint8)
+            
+            # Create mask for valid data
+            if nodata is not None:
+                valid_mask = ~np.isnan(data) & (data != nodata)
+            else:
+                valid_mask = ~np.isnan(data)
+            
+            if not np.any(valid_mask):
+                # Return transparent tile if no valid data
+                tile = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
+                buffer = io.BytesIO()
+                tile.save(buffer, format='PNG')
+                buffer.seek(0)
+                return HttpResponse(buffer.getvalue(), content_type='image/png')
+            
+            # Apply color ramp based on layer type
+            if layer_type == 'filled_dem':
+                # Terrain color ramp (green-yellow-brown-white)
+                vmin = np.nanpercentile(data[valid_mask], 2)
+                vmax = np.nanpercentile(data[valid_mask], 98)
+                normalized = np.clip((data - vmin) / (vmax - vmin + 1e-10), 0, 1)
+                
+                # Terrain colors: green (low) -> yellow -> brown -> white (high)
+                rgba[valid_mask, 0] = (normalized[valid_mask] * 200 + 55).astype(np.uint8)  # R
+                rgba[valid_mask, 1] = ((1 - normalized[valid_mask] * 0.5) * 200).astype(np.uint8)  # G
+                rgba[valid_mask, 2] = (normalized[valid_mask] * 100).astype(np.uint8)  # B
+                rgba[valid_mask, 3] = 180  # Alpha
+                
+            elif layer_type == 'flow_direction':
+                # Flow direction: 8 distinct colors for 8 directions
+                # D8 encoding: 1=E, 2=SE, 4=S, 8=SW, 16=W, 32=NW, 64=N, 128=NE
+                direction_colors = {
+                    1: (255, 0, 0),      # E - Red
+                    2: (255, 127, 0),    # SE - Orange
+                    4: (255, 255, 0),    # S - Yellow
+                    8: (127, 255, 0),    # SW - Yellow-Green
+                    16: (0, 255, 0),     # W - Green
+                    32: (0, 255, 255),   # NW - Cyan
+                    64: (0, 127, 255),   # N - Light Blue
+                    128: (127, 0, 255),  # NE - Purple
+                }
+                
+                for direction, color in direction_colors.items():
+                    mask = valid_mask & (data == direction)
+                    rgba[mask, 0] = color[0]
+                    rgba[mask, 1] = color[1]
+                    rgba[mask, 2] = color[2]
+                    rgba[mask, 3] = 180
+                
+            elif layer_type == 'flow_accumulation':
+                # Flow accumulation: logarithmic blue scale (streams are brighter)
+                # Use log scale since values range from 1 to millions
+                log_data = np.log10(data + 1)
+                vmin = 0
+                vmax = np.nanpercentile(log_data[valid_mask], 99)
+                normalized = np.clip((log_data - vmin) / (vmax - vmin + 1e-10), 0, 1)
+                
+                # Blue gradient - brighter for higher accumulation (streams)
+                rgba[valid_mask, 0] = (normalized[valid_mask] * 100).astype(np.uint8)  # R
+                rgba[valid_mask, 1] = (normalized[valid_mask] * 150).astype(np.uint8)  # G
+                rgba[valid_mask, 2] = (100 + normalized[valid_mask] * 155).astype(np.uint8)  # B
+                rgba[valid_mask, 3] = (50 + normalized[valid_mask] * 180).astype(np.uint8)  # Alpha varies
+            
+            # Create PIL Image
+            tile = Image.fromarray(rgba, 'RGBA')
+        
+        # Save to bytes
+        buffer = io.BytesIO()
+        tile.save(buffer, format='PNG', optimize=True)
+        buffer.seek(0)
+        
+        response = HttpResponse(buffer.getvalue(), content_type='image/png')
+        response['Cache-Control'] = 'public, max-age=3600'  # Cache for 1 hour
+        return response
+        
+    except RasterLayer.DoesNotExist:
+        return HttpResponse(status=404)
+    except Exception as e:
+        logger.error(f"Error generating raster tile: {str(e)}", exc_info=True)
+        return HttpResponse(status=500)
+
+
+def api_discharge_stats(request):
+    """
+    API endpoint to get discharge statistics for the current dataset.
+    
+    Returns discharge distribution across all site pairs, enabling
+    visualization of spatially-varying discharge.
+    """
+    from .models import SitePair
+    from django.db.models import Min, Max, Avg, StdDev, Count
+    
+    try:
+        raster_layer_id = request.GET.get('raster_layer')
+        
+        queryset = SitePair.objects.all()
+        
+        if raster_layer_id:
+            queryset = queryset.filter(raster_layer_id=int(raster_layer_id))
+        
+        # Filter out null discharge values
+        queryset = queryset.filter(discharge__isnull=False, discharge__gt=0)
+        
+        stats = queryset.aggregate(
+            count=Count('id'),
+            min_discharge=Min('discharge'),
+            max_discharge=Max('discharge'),
+            avg_discharge=Avg('discharge'),
+            std_discharge=StdDev('discharge'),
+            min_power=Min('power'),
+            max_power=Max('power'),
+            avg_power=Avg('power'),
+        )
+        
+        # Get discharge distribution (histogram bins)
+        discharges = list(queryset.values_list('discharge', flat=True))
+        
+        if discharges:
+            import numpy as np
+            hist, bin_edges = np.histogram(discharges, bins=10)
+            distribution = [
+                {'range': f'{bin_edges[i]:.2f}-{bin_edges[i+1]:.2f}', 'count': int(hist[i])}
+                for i in range(len(hist))
+            ]
+        else:
+            distribution = []
+        
+        return JsonResponse({
+            'statistics': {
+                'count': stats['count'] or 0,
+                'min_discharge_m3s': round(stats['min_discharge'] or 0, 3),
+                'max_discharge_m3s': round(stats['max_discharge'] or 0, 2),
+                'avg_discharge_m3s': round(stats['avg_discharge'] or 0, 3),
+                'std_discharge_m3s': round(stats['std_discharge'] or 0, 3),
+                'min_power_kw': round(stats['min_power'] or 0, 2),
+                'max_power_kw': round(stats['max_power'] or 0, 2),
+                'avg_power_kw': round(stats['avg_power'] or 0, 2),
+            },
+            'distribution': distribution,
+            'is_spatially_varying': stats['std_discharge'] is not None and stats['std_discharge'] > 0.01
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting discharge stats: {str(e)}", exc_info=True)
         return JsonResponse({'error': str(e)}, status=500)
 
 
