@@ -148,7 +148,7 @@ def geojson_site_pairs(request):
                     'id': pair.id,
                     'pair_id': pair.pair_id,
                     'head': round(pair.head, 2),
-                    'discharge': round(pair.discharge, 6) if pair.discharge else None,
+                    'discharge': round(pair.discharge, 2) if pair.discharge else None,
                     'power': round(pair.power, 2) if pair.power else None,
                     'efficiency': pair.efficiency,
                     'river_distance': round(pair.river_distance, 2),

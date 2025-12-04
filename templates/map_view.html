@@ -709,19 +709,19 @@ function createSitePopup(props) {
             <div class="popup-header">Site ${props.pair_id}</div>
             <div class="popup-row">
                 <span class="popup-label">Head:</span>
-                <span class="popup-value">${props.head ? props.head.toFixed(2) : 'N/A'} m</span>
+                <span class="popup-value">${props.head} m</span>
             </div>
             <div class="popup-row">
                 <span class="popup-label">Discharge:</span>
-                <span class="popup-value">${props.discharge != null ? props.discharge.toFixed(4) : 'N/A'} m³/s</span>
+                <span class="popup-value">${props.discharge || 'N/A'} m³/s</span>
             </div>
             <div class="popup-row">
                 <span class="popup-label">Power:</span>
-                <span class="popup-value">${props.power != null ? props.power.toFixed(2) : 'N/A'} kW</span>
+                <span class="popup-value">${props.power || 'N/A'} kW</span>
             </div>
             <div class="popup-row">
                 <span class="popup-label">River Distance:</span>
-                <span class="popup-value">${props.river_distance ? props.river_distance.toFixed(2) : 'N/A'} m</span>
+                <span class="popup-value">${props.river_distance} m</span>
             </div>
             ${props.score ? `<div class="popup-row"><span class="popup-label">Score:</span><span class="popup-value">${props.score}</span></div>` : ''}
             ${props.rank ? `<div class="popup-row"><span class="popup-label">Rank:</span><span class="popup-value">#${props.rank}</span></div>` : ''}

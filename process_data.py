@@ -343,9 +343,9 @@ class DataProcessor:
                 raise Exception(f"Flow direction failed: {flow_dir_result.get('error')}")
             self.console.success("Flow direction computed")
             
-            # 3. Compute flow accumulation (directly from filled DEM for reliability)
+            # 3. Compute flow accumulation
             self.console.info("Computing flow accumulation...")
-            flow_accum_result = preprocessor.compute_flow_accumulation(filled_path, flow_accum_path)
+            flow_accum_result = preprocessor.compute_flow_accumulation(flow_dir_path, flow_accum_path)
             if not flow_accum_result.get('success'):
                 raise Exception(f"Flow accumulation failed: {flow_accum_result.get('error')}")
             self.console.success("Flow accumulation computed")

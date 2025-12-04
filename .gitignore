@@ -1,5 +1,6 @@
 env/
 docs/
+.env
 
 # Python cache
 __pycache__/

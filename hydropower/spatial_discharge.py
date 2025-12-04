@@ -163,8 +163,10 @@ class SpatialDischargeCalculator:
         # Area ratio = flow_acc_site / flow_acc_outlet
         area_ratio = flow_acc / self.max_flow_acc
         
-        # Calculate discharge (no minimum cap - let actual area ratio determine flow)
-        # Note: Very small streams will have very small discharge
+        # Ensure minimum ratio for numerical stability
+        area_ratio = max(area_ratio, 0.001)
+        
+        # Calculate discharge
         q_site = q_outlet * area_ratio
         
         return q_site
@@ -253,25 +255,23 @@ def update_site_pair_discharge_spatial(
     with transaction.atomic():
         for site_pair in site_pairs:
             try:
-                # For run-of-river hydropower, discharge at outlet determines available flow
-                # Water is diverted at inlet but collected at outlet (powerhouse location)
-                # Use OUTLET coordinates for flow accumulation-based discharge calculation
+                # Get outlet coordinates (outlet accumulates all upstream flow!)
                 outlet_x = site_pair.outlet.geometry.x
                 outlet_y = site_pair.outlet.geometry.y
                 
-                # Calculate discharge at outlet location (where flow accumulation is measured)
+                # Calculate discharge at outlet location
                 q_site = calculator.calculate_discharge(outlet_x, outlet_y, q_outlet)
                 
                 if q_site is None:
-                    # Fallback: use area ratio based on stream order at outlet
+                    # Fallback: use area ratio based on stream order
                     # Higher order = more upstream area
-                    stream_order = site_pair.outlet.stream_order or site_pair.inlet.stream_order or 1
+                    stream_order = site_pair.inlet.stream_order or 1
                     fallback_ratio = min(0.5, stream_order * 0.1)
                     q_site = q_outlet * fallback_ratio
                     logger.debug(f"Site {site_pair.pair_id}: fallback discharge (order={stream_order})")
                 
-                # No minimum discharge constraint - use actual area-proportional value
-                # This allows each site to have a unique discharge based on its drainage area
+                # Ensure minimum discharge for numerical stability
+                q_site = max(q_site, 0.01)  # At least 10 L/s
                 
                 # Update discharge
                 site_pair.discharge = q_site
