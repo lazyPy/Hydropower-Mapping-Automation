@@ -587,15 +587,13 @@ class WatershedDelineator:
         watersheds_gdf = watersheds_gdf.dissolve(by='watershed_id', as_index=False)
         logger.info(f"After dissolve: {len(watersheds_gdf)} watershed polygons")
         
-        # Explode MultiPolygons back to individual Polygons
-        # This handles cases where a watershed has disconnected parts
+        # Keep MultiPolygons as-is (PostGIS handles them fine)
+        # No need to explode - this would create 800k+ individual features
         from shapely.geometry import Polygon, MultiPolygon
         
         multi_count = len(watersheds_gdf[watersheds_gdf.geometry.type == 'MultiPolygon'])
         if multi_count > 0:
-            logger.info(f"Exploding {multi_count} MultiPolygons to individual Polygons...")
-            watersheds_gdf = watersheds_gdf.explode(index_parts=False).reset_index(drop=True)
-            logger.info(f"After explode: {len(watersheds_gdf)} polygon features")
+            logger.info(f"Keeping {multi_count} watersheds as MultiPolygons (disconnected parts)")
         
         # Compute watershed statistics
         watersheds_gdf['area_m2'] = watersheds_gdf.geometry.area

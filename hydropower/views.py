@@ -626,141 +626,6 @@ def geojson_bridges(request):
         return JsonResponse({'error': str(e)}, status=500)
 
 
-@cache_page(60 * 5)  # Cache for 5 minutes
-def geojson_diversion_zones(request):
-    """
-    GeoJSON endpoint for diversion zones (similar elevation areas around inlets).
-    
-    These zones represent areas around each inlet point that have similar elevation,
-    identifying potential water diversion or storage locations at constant head.
-    
-    Returns FeatureCollection with:
-    - MultiPolygon geometry (diversion zone boundaries)
-    - Zone statistics (area, elevation, slope)
-    - CRS transformation: EPSG:32651 → EPSG:4326
-    
-    Query parameters:
-    - raster_layer: Filter by source DEM ID
-    - min_area: Minimum zone area in hectares
-    - max_zones: Maximum number of zones to return (default: 500)
-    - site_pair_id: Filter to zones for a specific site pair
-    """
-    from pyproj import Transformer
-    
-    try:
-        raster_layer_id = request.GET.get('raster_layer')
-        min_area_ha = request.GET.get('min_area', 0)
-        max_zones = request.GET.get('max_zones', 500)
-        site_pair_id = request.GET.get('site_pair_id')
-        
-        # Import model
-        from .models import DiversionZone, SitePair
-        
-        queryset = DiversionZone.objects.select_related('inlet_point').all()
-        
-        # Apply filters
-        if raster_layer_id:
-            queryset = queryset.filter(raster_layer_id=int(raster_layer_id))
-        
-        if float(min_area_ha) > 0:
-            queryset = queryset.filter(area_hectares__gte=float(min_area_ha))
-        
-        if site_pair_id:
-            # Get inlet point for this site pair
-            try:
-                site_pair = SitePair.objects.get(id=int(site_pair_id))
-                queryset = queryset.filter(inlet_point=site_pair.inlet)
-            except SitePair.DoesNotExist:
-                pass
-        
-        # Order by area (largest first) and limit
-        queryset = queryset.order_by('-area_hectares')[:int(max_zones)]
-        
-        # CRS transformer
-        transformer = Transformer.from_crs('EPSG:32651', 'EPSG:4326', always_xy=True)
-        
-        features = []
-        for zone in queryset:
-            # Transform geometry
-            from shapely import wkb
-            from shapely.ops import transform
-            import json
-            
-            # Convert GeoDjango geometry to Shapely
-            geom_shapely = wkb.loads(bytes(zone.geometry.wkb))
-            
-            # Transform coordinates
-            geom_transformed = transform(transformer.transform, geom_shapely)
-            
-            # Convert to GeoJSON dict
-            geom_dict = json.loads(json.dumps(geom_transformed.__geo_interface__))
-            
-            # Transform centroid
-            centroid_lng, centroid_lat = None, None
-            if zone.centroid:
-                centroid_lng, centroid_lat = transformer.transform(zone.centroid.x, zone.centroid.y)
-            
-            # Get associated site pair rank if exists
-            site_pair_rank = None
-            site_pair_power = None
-            try:
-                site_pair = SitePair.objects.filter(inlet=zone.inlet_point).first()
-                if site_pair:
-                    site_pair_rank = site_pair.rank
-                    site_pair_power = site_pair.power
-            except:
-                pass
-            
-            feature = {
-                'type': 'Feature',
-                'geometry': geom_dict,
-                'properties': {
-                    'id': zone.id,
-                    'zone_id': zone.zone_id,
-                    'inlet_site_id': zone.inlet_point.site_id if zone.inlet_point else None,
-                    'reference_elevation': round(zone.reference_elevation, 2),
-                    'elevation_tolerance': zone.elevation_tolerance,
-                    'search_radius': zone.search_radius,
-                    'min_elevation': round(zone.min_elevation, 2),
-                    'max_elevation': round(zone.max_elevation, 2),
-                    'mean_elevation': round(zone.mean_elevation, 2),
-                    'area_m2': round(zone.area_m2, 2),
-                    'area_hectares': round(zone.area_hectares, 4),
-                    'perimeter_m': round(zone.perimeter_m, 2),
-                    'pixel_count': zone.pixel_count,
-                    'mean_slope': round(zone.mean_slope, 2) if zone.mean_slope else None,
-                    'max_slope': round(zone.max_slope, 2) if zone.max_slope else None,
-                    'is_contiguous': zone.is_contiguous,
-                    'fragment_count': zone.fragment_count,
-                    'suitability_score': round(zone.suitability_score, 2) if zone.suitability_score else None,
-                    'centroid_lat': round(centroid_lat, 6) if centroid_lat else None,
-                    'centroid_lng': round(centroid_lng, 6) if centroid_lng else None,
-                    'site_pair_rank': site_pair_rank,
-                    'site_pair_power_kw': round(site_pair_power, 2) if site_pair_power else None,
-                }
-            }
-            features.append(feature)
-        
-        geojson = {
-            'type': 'FeatureCollection',
-            'crs': {
-                'type': 'name',
-                'properties': {'name': 'EPSG:4326'}
-            },
-            'features': features,
-            'metadata': {
-                'total_zones': len(features),
-                'total_area_hectares': sum(f['properties']['area_hectares'] for f in features)
-            }
-        }
-        
-        return JsonResponse(geojson, safe=False)
-        
-    except Exception as e:
-        logger.error(f"Error generating diversion zones GeoJSON: {str(e)}", exc_info=True)
-        return JsonResponse({'error': str(e)}, status=500)
-
-
 def geojson_weir_candidates(request):
     """
     GeoJSON endpoint for weir/diversion candidates (Objective 3).
@@ -771,6 +636,8 @@ def geojson_weir_candidates(request):
     Returns FeatureCollection with:
     - Point geometry (weir candidate locations)
     - Candidate metadata (elevation, distance, ranking)
+    - Best weir highlighted (rank_within_inlet=1) with special styling
+    - Connection lines from weir to inlet for visualization
     - CRS transformation: EPSG:32651 → EPSG:4326
     
     Query parameters:
@@ -778,6 +645,7 @@ def geojson_weir_candidates(request):
     - inlet_node_id: Filter to candidates for a specific inlet
     - min_rank: Minimum suitability rank (1=best)
     - max_candidates: Maximum number of candidates to return (default: 500)
+    - best_only: Show only best weir (rank=1) for each inlet (default: false)
     """
     from pyproj import Transformer
     
@@ -786,6 +654,7 @@ def geojson_weir_candidates(request):
         inlet_node_id = request.GET.get('inlet_node_id')
         min_rank = request.GET.get('min_rank', 1)
         max_candidates = request.GET.get('max_candidates', 500)
+        best_only = request.GET.get('best_only', 'false').lower() == 'true'
         
         # Import model
         from .models import WeirCandidate
@@ -799,7 +668,10 @@ def geojson_weir_candidates(request):
         if inlet_node_id:
             queryset = queryset.filter(inlet_node_id=inlet_node_id)
         
-        if int(min_rank) > 1:
+        if best_only:
+            # Show only rank 1 candidates
+            queryset = queryset.filter(rank_within_inlet=1)
+        elif int(min_rank) > 1:
             queryset = queryset.filter(rank_within_inlet__lte=int(min_rank))
         
         # Order by rank and limit
@@ -809,11 +681,20 @@ def geojson_weir_candidates(request):
         transformer = Transformer.from_crs('EPSG:32651', 'EPSG:4326', always_xy=True)
         
         features = []
+        connection_features = []  # Lines connecting weir to inlet
+        best_weirs_count = 0
+        
         for candidate in queryset:
             # Transform geometry
             weir_lng, weir_lat = transformer.transform(candidate.geometry.x, candidate.geometry.y)
             inlet_lng, inlet_lat = transformer.transform(candidate.inlet_point.geometry.x, candidate.inlet_point.geometry.y)
             
+            # Determine if this is the best weir for this inlet
+            is_best = (candidate.rank_within_inlet == 1)
+            if is_best:
+                best_weirs_count += 1
+            
+            # Weir point feature
             feature = {
                 'type': 'Feature',
                 'geometry': {
@@ -837,6 +718,7 @@ def geojson_weir_candidates(request):
                     'pair_ids_list': candidate.pair_ids_list,
                     'suitability_score': round(candidate.suitability_score, 2) if candidate.suitability_score else None,
                     'rank_within_inlet': candidate.rank_within_inlet,
+                    'is_best': is_best,  # Highlight best weir
                     'search_radius': candidate.search_radius,
                     'elevation_tolerance': candidate.elevation_tolerance,
                     'min_distance': candidate.min_distance,
@@ -850,6 +732,114 @@ def geojson_weir_candidates(request):
                 }
             }
             features.append(feature)
+            
+            # Add connection line from weir to inlet (for best weirs only)
+            if is_best:
+                connection_feature = {
+                    'type': 'Feature',
+                    'geometry': {
+                        'type': 'LineString',
+                        'coordinates': [[weir_lng, weir_lat], [inlet_lng, inlet_lat]]
+                    },
+                    'properties': {
+                        'type': 'weir_to_inlet_connection',
+                        'candidate_id': candidate.candidate_id,
+                        'inlet_node_id': candidate.inlet_node_id,
+                        'is_best': True,
+                        'distance_m': round(candidate.distance_from_inlet, 2)
+                    }
+                }
+                connection_features.append(connection_feature)
+        
+        # Combine weir points and connection lines
+        all_features = features + connection_features
+        
+        geojson = {
+            'type': 'FeatureCollection',
+            'crs': {
+                'type': 'name',
+                'properties': {'name': 'EPSG:4326'}
+            },
+            'features': all_features,
+            'metadata': {
+                'total_candidates': len(features),
+                'best_weirs': best_weirs_count,
+                'connection_lines': len(connection_features),
+                'unique_inlets': len(set(f['properties']['inlet_node_id'] for f in features)),
+                'best_only_filter': best_only
+            }
+        }
+        
+        return JsonResponse(geojson, safe=False)
+        
+    except Exception as e:
+        logger.error(f"Error generating weir candidates GeoJSON: {str(e)}", exc_info=True)
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@cache_page(60 * 5)  # Cache for 5 minutes
+def geojson_hp_nodes(request):
+    """
+    GeoJSON endpoint for HP nodes (hydropower nodes along main channel).
+    
+    These are candidate inlet/outlet points sampled systematically along
+    the main river channel for site assessment.
+    
+    Returns FeatureCollection with:
+    - Point geometry (HP node locations)
+    - Node attributes (elevation, chainage, distance along channel)
+    - CRS transformation: EPSG:32651 → EPSG:4326
+    
+    Query parameters:
+    - raster_layer: Filter by source DEM ID
+    - max_nodes: Maximum number of nodes to return (default: 1000)
+    """
+    from pyproj import Transformer
+    
+    try:
+        raster_layer_id = request.GET.get('raster_layer')
+        max_nodes = request.GET.get('max_nodes', 1000)
+        
+        # Import model
+        from .models import HPNode
+        
+        queryset = HPNode.objects.select_related('raster_layer').all()
+        
+        # Apply filters
+        if raster_layer_id:
+            queryset = queryset.filter(raster_layer_id=int(raster_layer_id))
+        
+        # Order by distance along channel and limit
+        queryset = queryset.order_by('distance_along_channel')[:int(max_nodes)]
+        
+        # CRS transformer
+        transformer = Transformer.from_crs('EPSG:32651', 'EPSG:4326', always_xy=True)
+        
+        features = []
+        for node in queryset:
+            # Transform geometry
+            node_lng, node_lat = transformer.transform(node.geometry.x, node.geometry.y)
+            
+            feature = {
+                'type': 'Feature',
+                'geometry': {
+                    'type': 'Point',
+                    'coordinates': [node_lng, node_lat]
+                },
+                'properties': {
+                    'id': node.id,
+                    'node_id': node.node_id,
+                    'elevation': round(node.elevation, 2),
+                    'distance_along_channel': round(node.distance_along_channel, 2),
+                    'chainage_km': round(node.chainage, 3),
+                    'sampling_interval': node.sampling_interval,
+                    'can_be_inlet': node.can_be_inlet,
+                    'can_be_outlet': node.can_be_outlet,
+                    'source_vector_name': node.source_vector_name,
+                    'created_at': node.created_at.isoformat(),
+                }
+            }
+            features.append(feature)
         
         geojson = {
             'type': 'FeatureCollection',
@@ -859,15 +849,16 @@ def geojson_weir_candidates(request):
             },
             'features': features,
             'metadata': {
-                'total_candidates': len(features),
-                'unique_inlets': len(set(f['properties']['inlet_node_id'] for f in features))
+                'total_nodes': len(features),
+                'channel_length_m': features[-1]['properties']['distance_along_channel'] if features else 0,
+                'channel_length_km': round(features[-1]['properties']['distance_along_channel'] / 1000.0, 2) if features else 0,
             }
         }
         
         return JsonResponse(geojson, safe=False)
         
     except Exception as e:
-        logger.error(f"Error generating weir candidates GeoJSON: {str(e)}", exc_info=True)
+        logger.error(f"Error generating HP nodes GeoJSON: {str(e)}", exc_info=True)
         return JsonResponse({'error': str(e)}, status=500)
 
 
@@ -1013,39 +1004,61 @@ def api_processing_status(request):
             },
             {
                 'step': 7,
-                'name': 'Site Pairing',
-                'status': 'completed' if raster.site_pairing_completed else 'not_started',
-                'has_layer': raster.site_pair_count > 0,
-                'layer_type': 'SITE_PAIRS',
-                'count': raster.site_pair_count,
-                'description': f'{raster.site_pair_count} inlet-outlet site pairs'
-            },
-            {
-                'step': 8,
-                'name': 'Infrastructure',
-                'status': 'completed' if raster.site_pair_count > 0 else 'not_started',
-                'has_layer': raster.site_pair_count > 0,
-                'layer_type': 'INFRASTRUCTURE',
-                'description': 'Run-of-river hydropower infrastructure layout'
-            },
-            {
-                'step': 9,
                 'name': 'Discharge Calculation',
                 'status': 'completed' if raster.discharge_computed else 'not_started',
                 'has_layer': bool(raster.discharge_raster_path),
                 'layer_type': 'DISCHARGE_RASTER',
                 'description': f'Spatially-varying discharge (Q_outlet={raster.discharge_q_outlet or "N/A"} m³/s)'
             },
+        ]
+        
+        # Add main channel workflow steps (new systematic workflow)
+        from .models import HPNode, WeirCandidate
+        
+        hp_node_count = raster.hp_nodes.count()
+        main_channel_pairs_count = SitePair.objects.filter(
+            raster_layer=raster,
+            pair_id__startswith='HP_'
+        ).count()
+        weir_candidate_count = WeirCandidate.objects.filter(raster_layer=raster).count()
+        
+        processing_steps.extend([
+            {
+                'step': 8,
+                'name': 'HP Node Generation',
+                'status': 'completed' if hp_node_count > 0 else 'not_started',
+                'has_layer': hp_node_count > 0,
+                'layer_type': 'HP_NODES',
+                'count': hp_node_count,
+                'description': f'{hp_node_count} HP nodes along main channel'
+            },
+            {
+                'step': 9,
+                'name': 'Site Pairing',
+                'status': 'completed' if main_channel_pairs_count > 0 else 'not_started',
+                'has_layer': main_channel_pairs_count > 0,
+                'layer_type': 'MAIN_CHANNEL_PAIRS',
+                'count': main_channel_pairs_count,
+                'description': f'{main_channel_pairs_count} optimal site pairs (top 50)'
+            },
             {
                 'step': 10,
-                'name': 'Diversion Zones',
-                'status': 'completed' if raster.diversion_zones.exists() else 'not_started',
-                'has_layer': raster.diversion_zones.exists(),
-                'layer_type': 'DIVERSION_ZONES',
-                'count': raster.diversion_zones.count(),
-                'description': f'{raster.diversion_zones.count()} diversion zones (similar elevation areas around inlets)'
+                'name': 'Weir Search',
+                'status': 'completed' if weir_candidate_count > 0 else 'not_started',
+                'has_layer': weir_candidate_count > 0,
+                'layer_type': 'WEIR_CANDIDATES',
+                'count': weir_candidate_count,
+                'description': f'{weir_candidate_count} weir candidates identified'
             },
-        ]
+            {
+                'step': 11,
+                'name': 'Infrastructure',
+                'status': 'completed' if raster.site_pair_count > 0 else 'not_started',
+                'has_layer': raster.site_pair_count > 0,
+                'layer_type': 'INFRASTRUCTURE',
+                'description': 'Run-of-river hydropower infrastructure layout'
+            },
+        ])
         
         # Get available processing layers
         available_layers = list(ProcessingLayer.objects.filter(

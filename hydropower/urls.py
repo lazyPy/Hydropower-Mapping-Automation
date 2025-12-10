@@ -17,8 +17,8 @@ urlpatterns = [
     path('api/geojson/streams/', views.geojson_streams, name='geojson_streams'),
     path('api/geojson/subbasins/', views.geojson_subbasins, name='geojson_subbasins'),
     path('api/geojson/bridges/', views.geojson_bridges, name='geojson_bridges'),
-    path('api/geojson/diversion-zones/', views.geojson_diversion_zones, name='geojson_diversion_zones'),
     path('api/geojson/weir-candidates/', views.geojson_weir_candidates, name='geojson_weir_candidates'),
+    path('api/geojson/hp-nodes/', views.geojson_hp_nodes, name='geojson_hp_nodes'),
     
     # MVT (Mapbox Vector Tiles) API endpoints for large datasets
     path('api/mvt/site-pairs/<int:z>/<int:x>/<int:y>.pbf', views.mvt_site_pairs, name='mvt_site_pairs'),

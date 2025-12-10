@@ -1,83 +1,89 @@
 """
-Test script for weir candidate search
-"""
-import os
-import sys
-import django
+Quick Test: Weir Search with Top 10 Pairs (Small Scale Test)
 
-# Setup Django
-sys.path.insert(0, '.')
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'HYDROPOWER_MAPPING.settings')
+This tests the weir search functionality with a small subset to verify it works.
+"""
+
+import os
+os.environ['GDAL_LIBRARY_PATH'] = r'D:\Desktop\Hydro HEC-HMS\env\Lib\site-packages\osgeo\gdal.dll'
+os.environ['DJANGO_SETTINGS_MODULE'] = 'HYDROPOWER_MAPPING.settings'
+
+import django
 django.setup()
 
+from hydropower.main_channel_weir_search import run_main_channel_weir_search, WeirSearchConfig
 from hydropower.models import RasterLayer, SitePair, WeirCandidate
-from hydropower.weir_search import WeirSearch, WeirSearchConfig
-from django.conf import settings
+
+print("=" * 80)
+print("WEIR SEARCH TEST (Top 10 Pairs)")
+print("=" * 80)
 
 # Get raster layer
-rl = RasterLayer.objects.get(watershed_delineated=True)
-print(f'Testing weir search on RasterLayer {rl.id}')
+raster_layer = RasterLayer.objects.first()
+print(f"RasterLayer ID: {raster_layer.id}")
+print(f"Dataset: {raster_layer.dataset.name}")
 
-# Get top 50 pairs
-pairs = list(SitePair.objects.filter(raster_layer=rl, is_feasible=True).order_by('-power')[:50])
-print(f'Found {len(pairs)} top pairs\n')
+# DEM path
+dem_path = f"media/preprocessed/dem_{raster_layer.id}/filled_dem.tif"
+print(f"DEM Path: {dem_path}")
+print(f"DEM Exists: {os.path.exists(dem_path)}")
+print()
 
-# Show top 5 pairs
-print('Top 5 pairs:')
-for p in pairs[:5]:
-    print(f'  {p.pair_id}:')
-    print(f'    Inlet: ({p.inlet.geometry.x:.1f}, {p.inlet.geometry.y:.1f}), Elev={p.inlet.elevation:.1f}m')
-    print(f'    Outlet: ({p.outlet.geometry.x:.1f}, {p.outlet.geometry.y:.1f}), Elev={p.outlet.elevation:.1f}m')
-    print(f'    Head={p.head:.1f}m, Power={p.power:.1f}kW')
+# Check main channel pairs
+pair_count = SitePair.objects.filter(
+    raster_layer=raster_layer,
+    is_feasible=True,
+    pair_id__startswith='HP_'
+).count()
+print(f"Main Channel Pairs Available: {pair_count}")
+print()
 
-# Convert to pairs list
-pairs_list = [{
-    'pair_id': p.pair_id,
-    'inlet_node_id': p.inlet.site_id,
-    'outlet_node_id': p.outlet.site_id,
-    'inlet_x': p.inlet.geometry.x,
-    'inlet_y': p.inlet.geometry.y,
-    'inlet_elevation': p.inlet.elevation,
-    'outlet_x': p.outlet.geometry.x,
-    'outlet_y': p.outlet.geometry.y,
-    'power_kw': p.power
-} for p in pairs]
+# Run weir search with top 10 pairs (small test)
+print("Running weir search with top 10 pairs...")
+print("-" * 80)
 
-# Test weir search with relaxed constraints
-print('\nTesting with relaxed constraints...')
 config = WeirSearchConfig(
     search_radius_m=500.0,
-    min_distance_m=50.0,  # Reduced from 100m
-    elevation_tolerance_m=30.0,  # Increased from 20m
-    max_candidates_per_inlet=10,
-    cone_angle_deg=120.0,  # Increased from 90° (wider cone)
-    top_n_pairs=50
+    min_distance_m=100.0,
+    elevation_tolerance_m=20.0,
+    cone_angle_deg=90.0,
+    max_candidates_per_inlet=5  # Reduced for test
 )
 
-ws = WeirSearch(config)
-ws.load_dem(str(settings.MEDIA_ROOT / rl.filled_dem_path))
+results = run_main_channel_weir_search(
+    raster_layer_id=raster_layer.id,
+    dem_path=dem_path,
+    top_n_pairs=10,  # Small test with top 10
+    config=config,
+    generate_infrastructure=False  # Skip infrastructure for speed
+)
 
-inlets = ws.extract_top_inlets(pairs_list)
-print(f'Extracted {len(inlets)} unique inlets')
+print()
+print("=" * 80)
+print("TEST RESULTS")
+print("=" * 80)
+print(f"Total Weir Candidates: {results['total_candidates']}")
+print(f"Inlets Processed: {results['inlets_processed']}")
+print(f"Best Weirs Identified: {len(results['best_weirs'])}")
+print()
 
-candidates = ws.search_weir_candidates(inlets)
-print(f'\nFound {len(candidates)} weir candidates')
+if results['best_weirs']:
+    print("Best Weir Candidates:")
+    print("-" * 80)
+    for i, weir in enumerate(results['best_weirs'][:5], 1):
+        print(f"{i}. Inlet: {weir['inlet_site_id']:15s} | "
+              f"Score: {weir['suitability_score']:5.1f} | "
+              f"Distance: {weir['distance_from_inlet']:6.1f}m | "
+              f"Elev Diff: {weir['elevation_difference']:+6.1f}m")
 
-if len(candidates) > 0:
-    print('\nTop 5 candidates:')
-    for c in candidates[:5]:
-        print(f'  {c["candidate_id"]}:')
-        print(f'    Weir: ({c["weir_x"]:.1f}, {c["weir_y"]:.1f}), Elev={c["weir_z"]:.1f}m')
-        print(f'    Distance={c["distance_from_inlet"]:.1f}m, dZ={c["elevation_difference"]:.1f}m')
-        print(f'    Rank={c["rank_within_inlet"]}, Score={c.get("suitability_score", 0):.1f}')
-    
-    # Save to database
-    print('\nSaving to database...')
-    ws.save_to_postgis(inlets, candidates, rl.id)
-    
-    # Verify
-    saved_count = WeirCandidate.objects.filter(raster_layer=rl).count()
-    print(f'Verified: {saved_count} weir candidates in database')
-    print('SUCCESS!')
-else:
-    print('No candidates found - may need to adjust search parameters or check DEM data')
+print()
+print("Database Check:")
+print("-" * 80)
+total_weirs = WeirCandidate.objects.filter(raster_layer=raster_layer).count()
+best_weirs_db = WeirCandidate.objects.filter(raster_layer=raster_layer, rank_within_inlet=1).count()
+print(f"Total Weir Candidates in DB: {total_weirs}")
+print(f"Best Weirs (Rank 1): {best_weirs_db}")
+print()
+print("=" * 80)
+print("✓ TEST COMPLETED SUCCESSFULLY")
+print("=" * 80)

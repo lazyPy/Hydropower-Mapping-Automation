@@ -267,7 +267,7 @@ class WatershedPolygon(models.Model):
     )
     
     watershed_id = models.IntegerField(help_text="Watershed identifier from raster")
-    geometry = gis_models.PolygonField(srid=32651, help_text="Watershed boundary polygon (UTM Zone 51N)")
+    geometry = gis_models.MultiPolygonField(srid=32651, help_text="Watershed boundary (Polygon or MultiPolygon, UTM Zone 51N)")
     
     # Area statistics
     area_m2 = models.FloatField(help_text="Watershed area in square meters")
@@ -450,6 +450,99 @@ class SitePoint(gis_models.Model):
     
     def __str__(self):
         return f"{self.site_id} ({self.site_type})"
+
+
+class HPNode(gis_models.Model):
+    """
+    Model for hydropower nodes generated from main channel vector layer.
+    
+    These are candidate inlet/outlet points sampled along the main river channel
+    at regular intervals for systematic hydropower site assessment.
+    
+    Workflow:
+    1. Load main channel vector (e.g., Nominal-Channel.gpkg)
+    2. Sample points at regular intervals along the channel (e.g., every 500m)
+    3. Extract elevation from DEM at each point
+    4. Store as HP nodes for site pairing
+    """
+    
+    # Link to source raster layer (DEM)
+    raster_layer = models.ForeignKey(
+        'RasterLayer',
+        on_delete=models.CASCADE,
+        related_name='hp_nodes',
+        help_text="Source DEM used for elevation extraction"
+    )
+    
+    # Node identification
+    node_id = models.CharField(max_length=50, help_text="Unique HP node identifier (e.g., 'HP_001')")
+    
+    # Spatial data
+    geometry = gis_models.PointField(srid=32651, help_text="HP node location (UTM Zone 51N)")
+    elevation = models.FloatField(help_text="Elevation at node (meters above sea level)")
+    
+    # Watershed/Subbasin association
+    watershed = models.ForeignKey(
+        'WatershedPolygon',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='hp_nodes',
+        help_text="Watershed/subbasin containing this HP node"
+    )
+    
+    # Stream segment association
+    stream_segment = models.ForeignKey(
+        'StreamNetwork',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='hp_nodes',
+        help_text="Stream segment this node belongs to"
+    )
+    
+    # Main channel attributes
+    distance_along_channel = models.FloatField(help_text="Distance along stream from start (m)")
+    chainage = models.FloatField(help_text="Chainage marker (km)")
+    distance_to_outlet = models.FloatField(null=True, blank=True, help_text="Distance to watershed outlet (m)")
+    
+    # Vector source metadata
+    source_vector_layer = models.ForeignKey(
+        'VectorLayer',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='hp_nodes',
+        help_text="Source vector layer (main channel)"
+    )
+    source_vector_name = models.CharField(max_length=200, blank=True, help_text="Name of source vector layer")
+    
+    # Sampling parameters
+    sampling_interval = models.FloatField(default=500.0, help_text="Sampling interval along channel (m)")
+    
+    # Classification flags
+    can_be_inlet = models.BooleanField(default=True, help_text="Can serve as inlet point")
+    can_be_outlet = models.BooleanField(default=True, help_text="Can serve as outlet point")
+    
+    # Processing metadata
+    created_at = models.DateTimeField(default=timezone.now)
+    
+    class Meta:
+        db_table = "hp_nodes"
+        verbose_name = "HP Node"
+        verbose_name_plural = "HP Nodes"
+        ordering = ['watershed', 'distance_along_channel']
+        unique_together = [['raster_layer', 'node_id']]
+        indexes = [
+            models.Index(fields=['raster_layer', 'distance_along_channel']),
+            models.Index(fields=['watershed', 'distance_along_channel']),
+            models.Index(fields=['stream_segment']),
+            models.Index(fields=['elevation']),
+            models.Index(fields=['node_id']),
+        ]
+    
+    def __str__(self):
+        return f"{self.node_id} (Ch {self.chainage:.2f}km, Elev {self.elevation:.1f}m)"
 
 
 class SitePair(gis_models.Model):

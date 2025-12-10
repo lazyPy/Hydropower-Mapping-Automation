@@ -47,13 +47,15 @@ from django.utils import timezone
 from django.db import transaction
 
 # Project imports
-from hydropower.models import Dataset, RasterLayer, VectorLayer, StreamNetwork, WatershedPolygon, SitePair, HMSRun, TimeSeries, DiversionZone, WeirCandidate
+from hydropower.models import Dataset, RasterLayer, VectorLayer, StreamNetwork, WatershedPolygon, SitePair, HMSRun, TimeSeries, WeirCandidate
 from hydropower.dem_preprocessing import DEMPreprocessor
 from hydropower.watershed_delineation import WatershedDelineator
 from hydropower.discharge_association import DischargeAssociator, DischargeConfig
 from hydropower.site_pairing import InletOutletPairing, PairingConfig
-from hydropower.diversion_zone import generate_diversion_zones
 from hydropower.weir_search import WeirSearch, WeirSearchConfig
+from hydropower.hp_node_generation import generate_hp_nodes_from_main_channel
+from hydropower.watershed_hp_generation import generate_watershed_hp_nodes
+from hydropower.main_channel_weir_search import run_main_channel_weir_search
 from hydropower.utils import (
     parse_hms_csv, parse_hms_excel, 
     detect_hms_element_column, detect_hms_discharge_column
@@ -79,7 +81,7 @@ class ConsoleLogger:
     
     def __init__(self, log_file: Optional[str] = None):
         self.step_num = 0
-        self.total_steps = 10  # Actual implemented steps
+        self.total_steps = 13  # Updated: Added HP nodes, main channel pairing, weir search
         self.start_time = datetime.now()
         
         # Set up file logging
@@ -224,23 +226,40 @@ class DataProcessor:
         self.console.step("Clearing Existing Data")
         
         try:
-            with transaction.atomic():
-                # Delete in reverse dependency order
-                deleted_counts = {}
-                deleted_counts['Site Pairs'] = SitePair.objects.all().delete()[0]
-                deleted_counts['Watersheds'] = WatershedPolygon.objects.all().delete()[0]
-                deleted_counts['Streams'] = StreamNetwork.objects.all().delete()[0]
-                deleted_counts['Raster Layers'] = RasterLayer.objects.all().delete()[0]
-                deleted_counts['Vector Layers'] = VectorLayer.objects.all().delete()[0]
-                deleted_counts['Time Series'] = TimeSeries.objects.all().delete()[0]
-                deleted_counts['HMS Runs'] = HMSRun.objects.all().delete()[0]
-                deleted_counts['Datasets'] = Dataset.objects.all().delete()[0]
+            from django.db import connection
+            from hydropower.models import (
+                WeirCandidate, DiversionZone, SitePair, HPNode, SitePoint,
+                StreamNode, StreamNetwork, WatershedPolygon, RasterLayer,
+                VectorLayer, TimeSeries, HMSRun, Dataset
+            )
+            
+            # Use raw SQL to truncate all tables (faster and avoids FK issues)
+            with connection.cursor() as cursor:
+                tables = [
+                    'weir_candidates',
+                    'diversion_zones',
+                    'site_pairs',
+                    'hp_nodes',
+                    'site_points',
+                    'stream_nodes',
+                    'watershed_polygons',
+                    'stream_network',
+                    'vector_layers',
+                    'hms_runs',
+                    'datasets',
+                    'raster_layers',  # Delete last to avoid FK issues
+                ]
                 
-                for model, count in deleted_counts.items():
-                    if count > 0:
-                        self.console.success(f"Deleted {count} {model}")
+                self.console.info("Truncating database tables...")
+                for table in tables:
+                    try:
+                        cursor.execute(f'TRUNCATE TABLE {table} CASCADE;')
+                        self.console.success(f"Cleared {table}")
+                    except Exception as e:
+                        self.console.warning(f"Could not truncate {table}: {e}")
                 
                 self.console.success("Database cleared successfully")
+                
         except Exception as e:
             self.console.error(f"Failed to clear database: {e}")
             raise
@@ -347,7 +366,7 @@ class DataProcessor:
             
             # 3. Compute flow accumulation
             self.console.info("Computing flow accumulation...")
-            flow_accum_result = preprocessor.compute_flow_accumulation(flow_dir_path, flow_accum_path)
+            flow_accum_result = preprocessor.compute_flow_accumulation(filled_path, flow_accum_path)
             if not flow_accum_result.get('success'):
                 raise Exception(f"Flow accumulation failed: {flow_accum_result.get('error')}")
             self.console.success("Flow accumulation computed")
@@ -445,27 +464,41 @@ class DataProcessor:
             # Save to database
             self.console.info("Saving to database...")
             
-            # Save streams
+            # Save streams using bulk_create for performance
+            stream_objects = []
             for idx, row in stream_gdf.iterrows():
-                StreamNetwork.objects.create(
+                stream_objects.append(StreamNetwork(
                     raster_layer=raster,
                     stream_order=int(row.get('strahler_order', row.get('stream_order', 1))),
                     length_m=float(row.get('length_m', 0)),
                     stream_threshold=stream_threshold,
                     geometry=GEOSGeometry(row.geometry.wkt, srid=32651)
-                )
+                ))
             
-            # Save watersheds
+            self.console.info(f"Bulk inserting {len(stream_objects)} streams...")
+            StreamNetwork.objects.bulk_create(stream_objects, batch_size=1000)
+            
+            # Save watersheds using bulk_create for performance
+            from shapely.geometry import MultiPolygon, Polygon
+            watershed_objects = []
             for idx, row in watershed_gdf.iterrows():
-                WatershedPolygon.objects.create(
+                # Convert Polygon to MultiPolygon if needed
+                geom = row.geometry
+                if isinstance(geom, Polygon):
+                    geom = MultiPolygon([geom])
+                
+                watershed_objects.append(WatershedPolygon(
                     raster_layer=raster,
                     watershed_id=int(row.get('watershed_id', idx)),
                     area_m2=float(row.get('area_m2', 0)),
                     area_km2=float(row.get('area_m2', 0)) / 1_000_000,
                     perimeter_m=float(row.geometry.length),
                     stream_threshold=stream_threshold,
-                    geometry=GEOSGeometry(row.geometry.wkt, srid=32651)
-                )
+                    geometry=GEOSGeometry(geom.wkt, srid=32651)
+                ))
+            
+            self.console.info(f"Bulk inserting {len(watershed_objects)} watersheds...")
+            WatershedPolygon.objects.bulk_create(watershed_objects, batch_size=1000)
             
             # Update RasterLayer
             raster.watershed_delineated = True
@@ -988,7 +1021,7 @@ class DataProcessor:
             return False
     
     def associate_discharge_and_power(self, raster: RasterLayer) -> bool:
-        """Step 9: Associate discharge data with site pairs and calculate power
+        """Step 7: Associate discharge data with site pairs and calculate power
         
         UPDATED: Now uses spatially-varying discharge based on drainage area (flow accumulation).
         Each site gets a unique discharge value proportional to its upstream contributing area.
@@ -1091,182 +1124,154 @@ class DataProcessor:
             traceback.print_exc()
             return True  # Non-critical, continue anyway
     
-    def generate_diversion_zones(self, raster: RasterLayer) -> bool:
-        """Step 10: Generate diversion zones around inlet points
-        
-        This implements Step 2 of the hydropower site identification workflow:
-        - For each inlet point in existing site pairs, search the DEM
-        - Find cells with elevation similar to the inlet's elevation
-        - Generate polygon zones representing potential water diversion/storage areas
-        """
-        self.console.step("Generating Diversion Zones (Similar Elevation Search)")
+    def generate_hp_nodes(self, raster: RasterLayer) -> bool:
+        """Step 8: Generate HP nodes along main channel"""
+        self.console.step("Generating HP Nodes Along Main Channel")
         
         try:
-            # Check if we have site pairs
-            site_pairs = SitePair.objects.filter(raster_layer=raster, is_feasible=True)
-            if not site_pairs.exists():
-                self.console.warning("No feasible site pairs found - skipping diversion zones")
-                return True
+            # Get DEM path
+            dem_path = f"media/preprocessed/dem_{raster.id}/filled_dem.tif"
             
-            # Clear existing diversion zones for this raster
-            deleted_count = DiversionZone.objects.filter(site_pair__raster_layer=raster).delete()[0]
-            if deleted_count > 0:
-                self.console.info(f"Cleared {deleted_count} existing diversion zones")
+            if not os.path.exists(dem_path):
+                self.console.warning(f"DEM not found: {dem_path}")
+                return False
             
-            # Configuration parameters
-            search_radius = 500.0      # 500m search radius around inlet
-            elevation_tolerance = 2.0  # ±2m elevation tolerance
+            self.console.info("Generating HP nodes with 50m spacing...")
             
-            self.console.info(f"Configuration:")
-            self.console.info(f"  Search radius: {search_radius}m")
-            self.console.info(f"  Elevation tolerance: ±{elevation_tolerance}m")
-            
-            # Generate diversion zones using the correct function signature
-            result = generate_diversion_zones(
+            # Generate HP nodes
+            total_nodes = generate_hp_nodes_from_main_channel(
+                main_channel_path=self.MAIN_CHANNEL_VECTOR,
+                dem_path=dem_path,
                 raster_layer_id=raster.id,
-                search_radius=search_radius,
-                elevation_tolerance=elevation_tolerance,
-                limit=None  # No limit
+                vector_layer_id=None,
+                layer_name='main_channel',
+                sampling_interval_m=50.0
             )
             
-            if result:
-                zones_generated = result.get('zones_generated', 0)
-                zones_saved = result.get('zones_saved', 0)
-                total_area = result.get('total_area_hectares', 0)
-                
-                self.stats['Diversion Zones'] = zones_saved
-                
-                self.console.info(f"\nDiversion Zone Statistics:")
-                self.console.info(f"  Zones generated: {zones_generated}")
-                self.console.info(f"  Zones saved: {zones_saved}")
-                self.console.info(f"  Total area: {total_area:.2f} hectares")
-                if zones_saved > 0:
-                    self.console.info(f"  Average area: {total_area/zones_saved:.2f} hectares")
-                
-                self.console.success(f"Generated {zones_saved} diversion zones")
-            else:
-                self.console.warning("No diversion zones generated")
+            self.stats['HP Nodes'] = total_nodes
             
+            self.console.info(f"HP Node Generation Results:")
+            self.console.info(f"  Total nodes: {total_nodes}")
+            self.console.info(f"  Node spacing: 50m")
+            
+            self.console.success(f"Generated {total_nodes} HP nodes")
             return True
             
         except Exception as e:
-            self.console.error(f"Diversion zone generation failed: {e}")
+            self.console.error(f"HP node generation failed: {e}")
             import traceback
             traceback.print_exc()
-            return True  # Non-critical, continue anyway
+            return False
     
-    def search_weir_candidates(self, raster: RasterLayer) -> bool:
-        """Step 11: Search for weir/diversion candidates (Objective 3: HPP Location)
-        
-        This implements Objective 3 (Weir Identification):
-        - Extract inlet nodes from top-ranked IO pairs
-        - For each inlet, search DEM for candidate weir/diversion locations
-        - Apply directional constraint (toward outlet) and elevation tolerance
-        - Generate WeirCandidate records with suitability ranking
-        
-        Output: WeirCandidate points representing potential water intake structures
-        """
-        self.console.step("Searching for Weir/Diversion Candidates (Objective 3)")
+    def generate_main_channel_pairs(self, raster: RasterLayer) -> bool:
+        """Step 9: Generate main channel site pairs"""
+        self.console.step("Generating Main Channel Site Pairs")
         
         try:
-            # Check if we have site pairs
-            site_pairs = SitePair.objects.filter(raster_layer=raster, is_feasible=True).order_by('-power')
-            if not site_pairs.exists():
-                self.console.warning("No feasible site pairs found - skipping weir search")
-                return True
+            # Get DEM path
+            dem_path = f"media/preprocessed/dem_{raster.id}/filled_dem.tif"
             
-            # Clear existing weir candidates for this raster
-            deleted_count = WeirCandidate.objects.filter(raster_layer=raster).delete()[0]
-            if deleted_count > 0:
-                self.console.info(f"Cleared {deleted_count} existing weir candidates")
+            if not os.path.exists(dem_path):
+                self.console.warning(f"DEM not found: {dem_path}")
+                return False
             
-            # Configuration parameters
-            config = WeirSearchConfig(
-                search_radius_m=500.0,        # 500m search radius
-                min_distance_m=100.0,         # Minimum 100m from inlet
-                elevation_tolerance_m=20.0,   # ±20m elevation tolerance
-                max_candidates_per_inlet=10,  # Up to 10 candidates per inlet
-                cone_angle_deg=90.0,          # 90° directional cone half-angle
-                top_n_pairs=50                # Consider top 50 pairs
+            self.console.info("Pairing HP nodes (inlet-outlet combinations)...")
+            
+            # Generate HP nodes for watersheds
+            total_nodes = generate_watershed_hp_nodes(
+                dem_path=dem_path,
+                raster_layer_id=raster.id,
+                sampling_interval_m=200.0,
+                min_watershed_area_km2=1.0,
+                max_watersheds=None
             )
             
-            self.console.info(f"Configuration:")
-            self.console.info(f"  Search radius: {config.search_radius_m}m")
-            self.console.info(f"  Min distance from inlet: {config.min_distance_m}m")
-            self.console.info(f"  Elevation tolerance: ±{config.elevation_tolerance_m}m")
-            self.console.info(f"  Directional cone: {config.cone_angle_deg}° half-angle")
-            self.console.info(f"  Max candidates per inlet: {config.max_candidates_per_inlet}")
-            self.console.info(f"  Top N pairs to consider: {config.top_n_pairs}")
+            # Count site pairs from database
+            site_pairs = SitePair.objects.filter(raster_layer_id=raster.id).count()
+            self.stats['Main Channel Pairs'] = site_pairs
             
-            # Get top N site pairs
-            top_pairs = site_pairs[:config.top_n_pairs]
-            self.console.info(f"Extracted {len(top_pairs)} top-ranked site pairs")
+            self.console.info(f"Watershed HP Node Generation Results:")
+            self.console.info(f"  Total HP nodes: {total_nodes}")
+            self.console.info(f"  Site pairs created: {site_pairs}")
             
-            # Convert site pairs to dictionary format
-            pairs_list = []
-            for pair in top_pairs:
-                pairs_list.append({
-                    'pair_id': pair.pair_id,
-                    'inlet_node_id': pair.inlet.id,
-                    'outlet_node_id': pair.outlet.id,
-                    'inlet_x': pair.inlet.geometry.x,
-                    'inlet_y': pair.inlet.geometry.y,
-                    'inlet_elevation': pair.inlet.elevation,
-                    'outlet_x': pair.outlet.geometry.x,
-                    'outlet_y': pair.outlet.geometry.y,
-                    'power_kw': pair.power
-                })
-            
-            # Initialize weir search algorithm
-            weir_search = WeirSearch(config)
-            
-            # Load DEM (use original, not filled - filled has NODATA at stream locations)
-            dem_path = str(settings.MEDIA_ROOT / raster.dataset.file.name)
-            self.console.info(f"Using original DEM: {raster.dataset.file.name}")
-            weir_search.load_dem(dem_path)
-            
-            # Extract top inlets
-            inlet_nodes = weir_search.extract_top_inlets(pairs_list)
-            self.console.info(f"Found {len(inlet_nodes)} unique inlet nodes")
-            
-            # Search for weir candidates
-            weir_candidates = weir_search.search_weir_candidates(inlet_nodes)
-            
-            if len(weir_candidates) == 0:
-                self.console.warning("No weir candidates found")
-                return True
-            
-            # Save to database
-            _, weir_ids = weir_search.save_to_postgis(inlet_nodes, weir_candidates, raster.id)
-            
-            self.stats['Weir Candidates'] = len(weir_ids)
-            
-            # Display statistics
-            self.console.info(f"\nWeir Candidate Statistics:")
-            self.console.info(f"  Total candidates: {len(weir_candidates)}")
-            self.console.info(f"  Unique inlet nodes: {len(inlet_nodes)}")
-            if len(weir_candidates) > 0:
-                avg_dist = sum(c['distance_from_inlet'] for c in weir_candidates) / len(weir_candidates)
-                self.console.info(f"  Average distance from inlet: {avg_dist:.1f}m")
-                
-                # Show distribution by inlet
-                candidates_per_inlet = {}
-                for c in weir_candidates:
-                    inlet_id = c['inlet_node_id']
-                    candidates_per_inlet[inlet_id] = candidates_per_inlet.get(inlet_id, 0) + 1
-                
-                max_candidates = max(candidates_per_inlet.values())
-                min_candidates = min(candidates_per_inlet.values())
-                avg_candidates = len(weir_candidates) / len(inlet_nodes)
-                
-                self.console.info(f"  Candidates per inlet: min={min_candidates}, max={max_candidates}, avg={avg_candidates:.1f}")
-            
-            self.console.success(f"Generated {len(weir_ids)} weir candidates")
-            
+            self.console.success(f"Generated {total_nodes} HP nodes and {site_pairs} site pairs")
             return True
             
         except Exception as e:
-            self.console.error(f"Weir candidate search failed: {e}")
+            self.console.error(f"Main channel pairing failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def search_weir_candidates(self, raster: RasterLayer) -> bool:
+        """Step 10: Search for best weir locations and generate top 3 infrastructure"""
+        self.console.step("Searching Best Weir Locations (Top 3 with Infrastructure)")
+        
+        try:
+            # Check if we have main channel pairs
+            from hydropower.models import SitePair
+            site_pairs = SitePair.objects.filter(
+                raster_layer=raster,
+                is_feasible=True,
+                pair_id__startswith='HP_'
+            )
+            
+            if not site_pairs.exists():
+                self.console.warning("No main channel site pairs found - skipping weir search")
+                return True
+            
+            # Get DEM path
+            dem_path = f"media/preprocessed/dem_{raster.id}/filled_dem.tif"
+            
+            if not os.path.exists(dem_path):
+                self.console.warning(f"DEM not found: {dem_path}")
+                return False
+            
+            self.console.info("Running weir search on top 50 pairs...")
+            self.console.info("Configuration:")
+            self.console.info("  Search radius: 500m")
+            self.console.info("  Min distance from inlet: 100m")
+            self.console.info("  Elevation tolerance: ±20m")
+            self.console.info("  Directional cone: 90° half-angle")
+            self.console.info("  Infrastructure: Top 3 best weirs only")
+            
+            # Run main channel weir search with infrastructure generation
+            results = run_main_channel_weir_search(
+                raster_layer_id=raster.id,
+                dem_path=dem_path,
+                top_n_pairs=50,
+                generate_infrastructure=True
+            )
+            
+            self.stats['Weir Candidates'] = results['total_candidates']
+            self.stats['Best Weirs'] = len(results['best_weirs'])
+            self.stats['Infrastructure Layouts'] = results['infrastructure_generated']
+            
+            self.console.info(f"\nWeir Search Results:")
+            self.console.info(f"  Total candidates: {results['total_candidates']}")
+            self.console.info(f"  Inlets processed: {results['inlets_processed']}")
+            self.console.info(f"  Best weirs identified: {len(results['best_weirs'])}")
+            self.console.info(f"  Infrastructure generated: {results['infrastructure_generated']}")
+            
+            if results['best_weirs']:
+                # Sort and show top 3
+                sorted_weirs = sorted(
+                    results['best_weirs'],
+                    key=lambda w: (w.get('suitability_score', 0), -w.get('distance_from_inlet', 999999)),
+                    reverse=True
+                )
+                
+                self.console.info(f"\nTop 3 Best Weir Locations (with Infrastructure):")
+                for i, weir in enumerate(sorted_weirs[:3], 1):
+                    self.console.info(f"  {i}. {weir['inlet_site_id']} - "
+                                    f"Score: {weir['suitability_score']:.1f}, "
+                                    f"Distance: {weir['distance_from_inlet']:.0f}m")
+            
+            self.console.success(f"Generated {results['infrastructure_generated']} infrastructure layouts for top 3 weirs")
+            return True
+            
+        except Exception as e:
+            self.console.error(f"Weir search failed: {e}")
             import traceback
             traceback.print_exc()
             return True  # Non-critical, continue anyway
@@ -1441,13 +1446,18 @@ class DataProcessor:
             if not self.run_site_pairing(raster):
                 return False
             
-            # Step 9: Associate discharge and calculate power
+            # Step 7: Associate discharge and calculate power
             self.associate_discharge_and_power(raster)
             
-            # Step 10: Generate diversion zones
-            self.generate_diversion_zones(raster)
+            # Step 8: Generate HP nodes along main channel
+            if not self.generate_hp_nodes(raster):
+                self.console.warning("HP node generation failed, but continuing...")
             
-            # Step 11: Search for weir/diversion candidates (Objective 3)
+            # Step 9: Generate main channel site pairs
+            if not self.generate_main_channel_pairs(raster):
+                self.console.warning("Main channel pairing failed, but continuing...")
+            
+            # Step 10: Search for best weir locations and generate top 3 infrastructure
             self.search_weir_candidates(raster)
             
             # Success!
