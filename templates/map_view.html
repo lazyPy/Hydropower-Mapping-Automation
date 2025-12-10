@@ -355,11 +355,6 @@
                 <small>Bridges/POIs</small>
                 <span class="legend-count" id="count-bridges">0</span>
             </div>
-            <div class="legend-item" id="legend-weir-candidates">
-                <i class="bi bi-star-fill" style="color: #dc2626; font-size: 18px; margin-right: 8px;"></i>
-                <small>Best Weir Locations</small>
-                <span class="legend-count" id="count-weir-candidates">0</span>
-            </div>
         </div>
         
         <!-- Flow Direction Legend (Hidden by default, shown when Flow Direction layer is active) -->
@@ -413,7 +408,7 @@
             </div>
             <div class="legend-item" id="legend-channel">
                 <div class="legend-color" style="background: #059669; border: 2px dashed #059669; width: 30px;"></div>
-                <small>Channel</small>
+                <small>Headrace Channel</small>
             </div>
             <div class="legend-item" id="legend-forebay">
                 <i class="bi bi-box-fill" style="color: #a855f7; font-size: 18px; margin-right: 8px;"></i>
@@ -612,7 +607,6 @@ function loadMapData() {
         loadWatersheds(),
         loadSubbasins(),
         loadBridges(),
-        loadWeirCandidates(),
         loadHPNodes(),
         loadMainChannelSitePairs()
     ]).then(() => {
@@ -851,14 +845,6 @@ function renderInfrastructure(geojson) {
                         weight: 5,
                         opacity: 0.9
                     };
-                } else if (type === 'intake_to_settling') {
-                    // Small connector line between intake and settling basin
-                    return {
-                        color: '#0ea5e9', // Sky blue connector
-                        weight: 3,
-                        opacity: 0.8,
-                        dashArray: '4, 4'
-                    };
                 }
             }
             
@@ -895,13 +881,13 @@ function renderInfrastructure(geojson) {
                 const startCoord = coords[0];
                 const endCoord = coords[coords.length - 1];
                 popupContent += `
-                    <div class="popup-header"><i class="bi bi-arrows-angle-contract"></i> Conveyance Channel</div>
+                    <div class="popup-header"><i class="bi bi-arrows-angle-contract"></i> Headrace Channel</div>
                     <div class="popup-row"><span class="popup-label">Site:</span><span class="popup-value">${props.pair_id}</span></div>
                     <div class="popup-row"><span class="popup-label">Length:</span><span class="popup-value">${props.length_m ? props.length_m.toFixed(0) + ' m' : 'N/A'}</span></div>
                     <div class="popup-row"><span class="popup-label">Start:</span><span class="popup-value">${startCoord[1].toFixed(6)}, ${startCoord[0].toFixed(6)}</span></div>
                     <div class="popup-row"><span class="popup-label">End:</span><span class="popup-value">${endCoord[1].toFixed(6)}, ${endCoord[0].toFixed(6)}</span></div>
                     <div class="popup-row"><span class="popup-label">Rank:</span><span class="popup-value">#${props.rank}</span></div>
-                    <p class="mb-0"><small>Open channel transports water to forebay</small></p>
+                    <p class="mb-0"><small>Open channel from intake/weir to settling basin</small></p>
                 `;
             } else if (type === 'forebay_tank') {
                 const coords = feature.geometry.coordinates;
@@ -927,13 +913,6 @@ function renderInfrastructure(geojson) {
                     <div class="popup-row"><span class="popup-label">Rank:</span><span class="popup-value">#${props.rank}</span></div>
                     <p class="mb-0"><small>Pressure pipe delivers water to turbine</small></p>
                 `;
-            } else if (type === 'intake_to_settling') {
-                popupContent += `
-                    <div class="popup-header"><i class="bi bi-arrow-right-short"></i> Intake → Settling</div>
-                    <div class="popup-row"><span class="popup-label">Site:</span><span class="popup-value">${props.pair_id}</span></div>
-                    <div class="popup-row"><span class="popup-label">Rank:</span><span class="popup-value">#${props.rank}</span></div>
-                    <p class="mb-0"><small>Connector from intake weir to settling basin</small></p>
-                `;
             } else if (type === 'powerhouse') {
                 const coords = feature.geometry.coordinates;
                 popupContent += `
@@ -954,12 +933,11 @@ function renderInfrastructure(geojson) {
             const tooltipLabels = {
                 'intake_basin': 'Water Intake',
                 'settling_basin': 'Settling Basin',
-                'channel': 'Channel',
+                'channel': 'Headrace Channel',
                 'forebay_tank': 'Forebay Tank',
                 'penstock': 'Penstock',
                 'powerhouse': 'Powerhouse'
             };
-            tooltipLabels['intake_to_settling'] = 'Intake → Settling';
             layer.bindTooltip(tooltipLabels[type] || type, {
                 permanent: false,
                 direction: 'top'
@@ -1199,162 +1177,6 @@ function loadBridges() {
         })
         .catch(error => {
             console.error('Error loading bridges:', error);
-            return 0;
-        });
-}
-
-function loadWeirCandidates() {
-    const rasterLayerId = {{ raster_layer_id|default:"null" }};
-    if (!rasterLayerId) {
-        console.log('No raster layer ID, skipping weir candidates');
-        return Promise.resolve(0);
-    }
-    
-    // Load best weirs only (rank=1 per inlet)
-    return fetch(`{% url "hydropower:geojson_weir_candidates" %}?raster_layer=${rasterLayerId}&best_only=true`)
-        .then(response => response.json())
-        .then(geojson => {
-            if (!geojson.features || geojson.features.length === 0) {
-                console.log('No weir candidates found');
-                return 0;
-            }
-            
-            // Separate weir points from connection lines
-            const weirPoints = geojson.features.filter(f => f.geometry.type === 'Point' && !f.properties.type);
-            const connectionLines = geojson.features.filter(f => f.properties.type === 'weir_to_inlet_connection');
-            
-            // Create layer group to hold both points and lines
-            const weirLayerGroup = L.layerGroup();
-            
-            // Render connection lines first (so they appear below points)
-            if (connectionLines.length > 0) {
-                const connectionLayer = L.geoJSON(connectionLines, {
-                    style: function(feature) {
-                        const isBest = feature.properties.is_best;
-                        return {
-                            color: isBest ? '#dc2626' : '#f59e0b',  // Red for best, amber for others
-                            weight: isBest ? 3 : 2,
-                            opacity: isBest ? 0.9 : 0.6,
-                            dashArray: '5, 5'
-                        };
-                    }
-                });
-                connectionLayer.addTo(weirLayerGroup);
-            }
-            
-            // Render weir candidate points
-            const weirLayer = L.geoJSON(weirPoints, {
-                pointToLayer: function(feature, latlng) {
-                    const isBest = feature.properties.is_best;
-                    const rank = feature.properties.rank_within_inlet;
-                    
-                    if (isBest && rank === 1) {
-                        // Best weir - larger red marker with star icon
-                        return L.marker(latlng, {
-                            icon: L.divIcon({
-                                className: 'weir-best-icon',
-                                html: '<i class="bi bi-star-fill" style="font-size: 24px; color: #dc2626;"></i>',
-                                iconSize: [28, 28],
-                                iconAnchor: [14, 14]
-                            })
-                        });
-                    } else {
-                        // Regular weir candidate - amber circle
-                        return L.circleMarker(latlng, {
-                            radius: 6,
-                            fillColor: '#fbbf24',
-                            color: '#f59e0b',
-                            weight: 2,
-                            opacity: 1,
-                            fillOpacity: 0.8
-                        });
-                    }
-                },
-                onEachFeature: function(feature, layer) {
-                    const props = feature.properties;
-                    const isBest = props.is_best;
-                    
-                    const popupContent = `
-                        <div class="popup-content">
-                            <div class="popup-header">
-                                <i class="bi ${isBest ? 'bi-star-fill text-danger' : 'bi-geo-alt-fill text-warning'}"></i> 
-                                ${isBest ? '<strong>BEST WEIR</strong>' : 'Weir Candidate'}
-                            </div>
-                            <div class="popup-row">
-                                <span class="popup-label">ID:</span>
-                                <span class="popup-value">${props.candidate_id}</span>
-                            </div>
-                            <div class="popup-row">
-                                <span class="popup-label">Inlet:</span>
-                                <span class="popup-value">${props.inlet_node_id}</span>
-                            </div>
-                            <hr class="my-2">
-                            <div class="popup-row">
-                                <span class="popup-label">Elevation:</span>
-                                <span class="popup-value">${props.elevation} m</span>
-                            </div>
-                            <div class="popup-row">
-                                <span class="popup-label">Inlet Elev:</span>
-                                <span class="popup-value">${props.inlet_elevation} m</span>
-                            </div>
-                            <div class="popup-row">
-                                <span class="popup-label">Elev Diff:</span>
-                                <span class="popup-value">${props.elevation_difference > 0 ? '+' : ''}${props.elevation_difference.toFixed(2)} m</span>
-                            </div>
-                            <hr class="my-2">
-                            <div class="popup-row">
-                                <span class="popup-label">Distance:</span>
-                                <span class="popup-value">${props.distance_from_inlet.toFixed(1)} m from inlet</span>
-                            </div>
-                            ${props.angle_to_outlet_deg ? `<div class="popup-row"><span class="popup-label">Angle to Outlet:</span><span class="popup-value">${props.angle_to_outlet_deg.toFixed(1)}°</span></div>` : ''}
-                            <hr class="my-2">
-                            <div class="popup-row">
-                                <span class="popup-label">Rank:</span>
-                                <span class="popup-value ${props.rank_within_inlet === 1 ? 'text-danger fw-bold' : ''}">#${props.rank_within_inlet}</span>
-                            </div>
-                            <div class="popup-row">
-                                <span class="popup-label">Score:</span>
-                                <span class="popup-value ${props.suitability_score >= 95 ? 'text-success fw-bold' : ''}">${props.suitability_score ? props.suitability_score.toFixed(2) : 'N/A'}</span>
-                            </div>
-                            <hr class="my-2">
-                            <small class="text-muted">
-                                <i class="bi bi-info-circle"></i> 
-                                ${isBest ? '<strong>Optimal location selected for infrastructure generation.</strong>' : 'Candidate location for water diversion weir/intake structure.'}
-                                ${props.outlet_count} outlet(s) associated.
-                            </small>
-                        </div>
-                    `;
-                    
-                    layer.bindPopup(popupContent, { maxWidth: 350 });
-                    
-                    // Tooltip shows best status
-                    const tooltipText = isBest ? 
-                        `<strong>⭐ BEST: ${props.candidate_id}</strong><br>Score: ${props.suitability_score.toFixed(1)}` :
-                        `${props.candidate_id}<br>Rank ${props.rank_within_inlet}`;
-                    
-                    layer.bindTooltip(tooltipText, {
-                        permanent: false,
-                        direction: 'top'
-                    });
-                }
-            });
-            
-            weirLayer.addTo(weirLayerGroup);
-            
-            // Add the complete layer group to the map
-            overlayLayers['Weir Candidates'] = weirLayerGroup;
-            weirLayerGroup.addTo(map);
-            
-            // Update legend count (count only weir points, not connection lines)
-            const count = weirPoints.length;
-            const bestCount = weirPoints.filter(f => f.properties.is_best).length;
-            document.getElementById('count-weir-candidates').textContent = `${bestCount}/${count}`;
-            
-            console.log(`Loaded ${count} weir candidates (${bestCount} best, ${connectionLines.length} connection lines)`);
-            return count;
-        })
-        .catch(error => {
-            console.error('Error loading weir candidates:', error);
             return 0;
         });
 }

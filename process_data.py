@@ -416,7 +416,7 @@ class DataProcessor:
         self.console.step("Delineating Watersheds and Extracting Streams")
         
         try:
-            stream_threshold = self.config.get('stream_threshold', 1000)
+            stream_threshold = self.config.get('stream_threshold', 20)  # Default 20 (aligned with command-line default)
             self.console.info(f"Stream threshold: {stream_threshold} cells")
             
             # Adaptive threshold validation
@@ -925,19 +925,20 @@ class DataProcessor:
             streams_gdf.to_file(temp_gpkg, driver='GPKG')
             self.console.info(f"Exported stream network to temporary file")
             
-            # Configure pairing algorithm (optimized for practical hydropower sites)
+            # Configure pairing algorithm - ALIGNED WITH REFERENCE (reference_here.py)
             pairing_config = PairingConfig(
-                min_head=5.0,           # Lower for micro-hydro sites
-                max_head=200.0,         # More realistic for small terrain
-                min_river_distance=50.0,    # Shorter minimum distance
-                max_river_distance=2000.0,  # Appropriate scale for small watershed
+                min_head=20.0,          # MIN_HEAD_PAIR_M from reference
+                max_head=500.0,         # Increased for broader applicability
+                min_river_distance=20.0,    # Minimum distance
+                max_river_distance=2000.0,  # PAIR_SEARCH_RADIUS_M from reference
                 min_stream_order=1,     # Accept first-order streams (when main_river_only=False)
                 max_candidates_per_type=50,   # Further reduced to 50 inlets/outlets for faster processing
                 max_outlets_per_inlet=3,      # Only check top 3 outlets per inlet
-                efficiency=0.7,         # Standard 70% efficiency
+                efficiency=0.8,         # EFFICIENCY from reference (80%)
                 main_river_only=True,   # Focus on main river stem and major reaches (practical sites)
                 min_main_river_order=2,  # Streams with order ≥2 considered main river (adaptive for small watersheds)
-                min_main_river_length_m=12.0  # Adaptive: uses top 20% if no streams meet threshold
+                min_main_river_length_m=12.0,  # Adaptive: uses top 20% if no streams meet threshold
+                node_spacing=100.0      # NODE_SPACING_M from reference
             )
             
             # Initialize pairing algorithm with raster_layer_id for persisting main river flags

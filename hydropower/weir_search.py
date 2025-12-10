@@ -30,13 +30,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class WeirSearchConfig:
-    """Configuration for weir/diversion search"""
-    search_radius_m: float = 500.0          # Search radius around inlet (m)
-    min_distance_m: float = 100.0           # Minimum distance from inlet (m)
-    elevation_tolerance_m: float = 20.0     # |DEM_z - inlet_z| <= this (m)
-    max_candidates_per_inlet: int = 10      # Max candidates per inlet
-    cone_angle_deg: float = 90.0            # Directional cone half-angle (degrees)
-    top_n_pairs: int = 50                   # Number of top IO pairs to consider
+    """Configuration for weir/diversion search - ALIGNED WITH REFERENCE (reference_here.py)"""
+    search_radius_m: float = 1500.0         # Search radius around inlet (m) - WEIR_SEARCH_RADIUS_M from reference
+    min_distance_m: float = 500.0           # Minimum distance from inlet (m) - WEIR_MIN_DIST_M from reference
+    elevation_tolerance_m: float = 20.0     # |DEM_z - inlet_z| <= this (m) - WEIR_ELEV_TOLERANCE_M from reference
+    max_candidates_per_inlet: int = 3       # Max candidates per inlet - WEIR_MAX_CANDIDATES_PER_IN from reference
+    cone_angle_deg: float = 50.0            # Directional cone half-angle (degrees) - WEIR_ANGLE_LIMIT_DEG from reference
+    top_n_pairs: int = 200                  # Number of top IO pairs to consider - TOP_N_PAIRS from reference
 
 
 class WeirSearch:

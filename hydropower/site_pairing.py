@@ -120,13 +120,13 @@ def calculate_head_losses(discharge: float, penstock_length: float, gross_head: 
 class PairingConfig:
     """Configuration parameters for inlet-outlet pairing algorithm"""
     
-    # Head constraints - LOWERED for micro/small hydro potential
-    min_head: float = 5.0  # meters (was 10.0, lowered for micro-hydro)
+    # Head constraints - ALIGNED WITH REFERENCE (reference_here.py)
+    min_head: float = 20.0  # meters (MIN_HEAD_PAIR_M from reference)
     max_head: float = 500.0  # meters
     
-    # Distance constraints - EXPANDED for more site discovery
-    min_river_distance: float = 20.0  # meters (was 50.0, lowered for short streams)
-    max_river_distance: float = 8000.0  # meters (was 5000.0)
+    # Distance constraints - ALIGNED WITH REFERENCE (reference_here.py)
+    min_river_distance: float = 20.0  # meters
+    max_river_distance: float = 2000.0  # meters (PAIR_SEARCH_RADIUS_M from reference)
     
     # Spacing and buffer
     spacing_buffer: float = 100.0  # meters (was 200.0, allow closer sites)
@@ -138,8 +138,8 @@ class PairingConfig:
     weight_distance: float = 0.2
     weight_accessibility: float = 0.1
     
-    # Efficiency factor
-    efficiency: float = 0.7  # 70% turbine efficiency (range: 0.6-0.85)
+    # Efficiency factor - ALIGNED WITH REFERENCE (reference_here.py)
+    efficiency: float = 0.8  # 80% turbine + generator efficiency (EFFICIENCY from reference)
     
     # Head loss coefficients (for accurate power calculation)
     penstock_roughness: float = 0.012  # Manning's n for steel pipe
@@ -163,14 +163,16 @@ class PairingConfig:
     min_main_river_order: int = 2  # Minimum stream order to consider as "main river" (when main_river_only=True)
     min_main_river_length_m: float = 12.0  # Minimum stream length (meters) - will use top 20% if no streams meet threshold
     
-    # Node densification parameters (for systematic IO pairing)
-    node_spacing: float = 50.0  # Spacing between nodes along channel (meters, was 100.0)
+    # Node densification parameters (for systematic IO pairing) - ALIGNED WITH REFERENCE
+    node_spacing: float = 100.0  # Spacing between nodes along channel (meters, NODE_SPACING_M from reference)
     use_node_densification: bool = True  # Enable systematic node-based pairing
     
-    # Flow accumulation parameters (for pair-specific discharge)
+    # Flow accumulation parameters (for pair-specific discharge) - ALIGNED WITH REFERENCE
     use_flow_accumulation: bool = False  # Use FA raster for discharge calculation
     q_outlet_design: Optional[float] = None  # Design Q at outlet for FA calibration (m³/s)
     constant_q_fallback: float = 7.0  # Fallback Q if FA not available (m³/s)
+    head_ref_m: float = 100.0  # Reference head for discharge scaling (HEAD_REF_M from reference)
+    use_head_based_q_scaling: bool = True  # Enable head-based Q scaling: Q_pair = Q_base * (head/head_ref)
     
     # Land feasibility parameters
     max_slope_percent: float = 45.0  # Maximum terrain slope for infrastructure (was 30%)
@@ -2236,13 +2238,22 @@ class InletOutletPairing:
         
         Uses terrain-based routing with least-cost path analysis for realistic layouts.
         
+        Flow sequence:
+        1. Intake/Weir (water diversion from river)
+        2. Headrace Channel (conveys water from intake to settling basin)
+        3. Settling Basin (removes sediment and debris)
+        4. Buried pipe (settling to forebay - not visualized)
+        5. Forebay Tank (surge tank before penstock)
+        6. Penstock (pressure pipe to powerhouse)
+        7. Powerhouse (turbine and generator)
+        
         Generates geometry for:
-        - Intake/Weir basin (at inlet)
-        - Settling basin (near intake, 20m downstream)
-        - Channel (follows terrain and stream network with least-cost path)
-        - Forebay tank (before penstock, at elevated position)
-        - Penstock (optimized path considering slope and accessibility)
-        - Powerhouse (at outlet, near turbine discharge point)
+        - Intake/Weir basin (at inlet point)
+        - Headrace Channel (from intake to settling basin, follows stream)
+        - Settling basin (20m downstream from intake, offset 10m)
+        - Forebay tank (near outlet, maintains elevation for penstock)
+        - Penstock (straight pressure pipe from forebay to powerhouse)
+        - Powerhouse (at outlet, turbine discharge point)
         
         Args:
             site_pair: SitePair model instance
@@ -2393,55 +2404,37 @@ class InletOutletPairing:
         
         settling_basin = GEOSPoint(settling_x, settling_y, srid=32651)
         
-        # 3. Channel path - From settling basin to forebay
+        # 3. Channel path - From intake/weir to settling basin
+        # This is the main headrace channel that diverts water from the river
         # Uses terrain-based routing with least-cost path considering:
         # - Stream network proximity (follow natural drainage)
         # - Terrain slope (avoid steep gradients)
         # - Distance efficiency (balance natural path vs. construction cost)
-        target_channel_length = site_pair.river_distance * 0.7  # Target 70% of river distance
         
-        # Try terrain-based routing if DEM available
-        channel_points, forebay_x, forebay_y = InletOutletPairing._calculate_terrain_based_channel(
-            settling_x, settling_y,
-            outlet_x, outlet_y,
-            stream_path_coords,
-            target_channel_length,
-            site_pair.raster_layer
-        )
-        
-        # Fallback: use stream path tracing if terrain routing not available
-        if channel_points is None and stream_path_coords and len(stream_path_coords) > 2:
+        # Channel goes from intake to settling basin (not settling to forebay)
+        # The settling-to-forebay connection is a short buried pipe, not visualized
+        if stream_path_coords and len(stream_path_coords) > 1:
+            # Use stream path from inlet to settling basin
             accumulated_dist = 0.0
-            forebay_x, forebay_y = settling_x, settling_y
-            channel_points = [(settling_x, settling_y)]
+            channel_points = [(inlet_x, inlet_y)]
             
-            # Find starting point in stream path closest to settling basin
-            min_dist = float('inf')
-            start_idx = 0
-            for i, (x, y) in enumerate(stream_path_coords):
-                dist = np.sqrt((x - settling_x)**2 + (y - settling_y)**2)
-                if dist < min_dist:
-                    min_dist = dist
-                    start_idx = i
-            
-            # Trace along stream from settling basin
-            for i in range(start_idx + 1, len(stream_path_coords)):
+            for i in range(1, len(stream_path_coords)):
                 x1, y1 = stream_path_coords[i-1]
                 x2, y2 = stream_path_coords[i]
                 segment_dist = np.sqrt((x2-x1)**2 + (y2-y1)**2)
                 
-                if accumulated_dist + segment_dist >= target_channel_length:
-                    # Interpolate to target length
-                    remaining = target_channel_length - accumulated_dist
-                    ratio = remaining / segment_dist if segment_dist > 0 else 0
-                    forebay_x = x1 + (x2 - x1) * ratio
-                    forebay_y = y1 + (y2 - y1) * ratio
-                    channel_points.append((forebay_x, forebay_y))
+                # Stop when we reach settling basin position
+                dist_to_settling = np.sqrt((x2 - settling_x)**2 + (y2 - settling_y)**2)
+                if dist_to_settling < 10.0:  # Within 10m of settling basin
+                    channel_points.append((settling_x, settling_y))
                     break
                 
                 accumulated_dist += segment_dist
                 channel_points.append((x2, y2))
-                forebay_x, forebay_y = x2, y2
+            
+            # Ensure settling basin is the last point
+            if channel_points[-1] != (settling_x, settling_y):
+                channel_points.append((settling_x, settling_y))
             
             # Use traced path for channel
             if len(channel_points) >= 2:
@@ -2453,49 +2446,33 @@ class InletOutletPairing:
                 )
             else:
                 # Fallback to straight line
-                channel_points = [(settling_x, settling_y), (forebay_x, forebay_y)]
+                channel_points = [(inlet_x, inlet_y), (settling_x, settling_y)]
                 channel = GEOSLineString(*channel_points, srid=32651)
-                channel_length = target_channel_length
+                channel_length = np.sqrt((settling_x - inlet_x)**2 + (settling_y - inlet_y)**2)
         else:
-            # Fallback: curved path with multiple points for natural appearance
-            dx = outlet_x - inlet_x
-            dy = outlet_y - inlet_y
-            distance_total = np.sqrt(dx**2 + dy**2)
-            unit_dx = dx / distance_total
-            unit_dy = dy / distance_total
-            
-            channel_length = target_channel_length
-            
-            # Create a meandering path with 5-7 curve points
-            num_points = 6
-            channel_points = [(settling_x, settling_y)]
-            
-            for i in range(1, num_points):
-                progress = i / (num_points - 1)  # 0.0 to 1.0
-                
-                # Base position along straight line
-                base_x = settling_x + unit_dx * channel_length * progress
-                base_y = settling_y + unit_dy * channel_length * progress
-                
-                # Add sinusoidal offset perpendicular to flow
-                # Creates natural-looking meanders
-                offset_magnitude = 20.0 * np.sin(progress * np.pi * 2)  # Oscillate 2 times
-                offset_x = base_x + (-unit_dy) * offset_magnitude
-                offset_y = base_y + (unit_dx) * offset_magnitude
-                
-                channel_points.append((offset_x, offset_y))
-            
-            forebay_x, forebay_y = channel_points[-1]
+            # Fallback: straight line from intake to settling basin
+            channel_points = [(inlet_x, inlet_y), (settling_x, settling_y)]
             channel = GEOSLineString(*channel_points, srid=32651)
-            channel_length = sum(
-                np.sqrt((channel_points[i][0] - channel_points[i-1][0])**2 + 
-                       (channel_points[i][1] - channel_points[i-1][1])**2)
-                for i in range(1, len(channel_points))
-            )
-            
-            # Adjust forebay position (skip the old linear calculation below)
+            channel_length = np.sqrt((settling_x - inlet_x)**2 + (settling_y - inlet_y)**2)
         
-        # 4. Forebay tank - At the end of channel, before penstock
+        # 4. Forebay tank - Positioned near outlet for optimal penstock length
+        # Forebay is placed slightly upstream of outlet (10-20m) to maintain elevation
+        dx_outlet = outlet_x - settling_x
+        dy_outlet = outlet_y - settling_y
+        dist_to_outlet = np.sqrt(dx_outlet**2 + dy_outlet**2)
+        
+        if dist_to_outlet > 20:
+            # Place forebay 15m upstream from outlet
+            unit_dx = dx_outlet / dist_to_outlet
+            unit_dy = dy_outlet / dist_to_outlet
+            forebay_x = outlet_x - unit_dx * 15.0
+            forebay_y = outlet_y - unit_dy * 15.0
+        else:
+            # If outlet is very close, place forebay at settling basin
+            forebay_x = settling_x
+            forebay_y = settling_y
+        
+        # 4b. Forebay tank geometry
         forebay_tank = GEOSPoint(forebay_x, forebay_y, srid=32651)
         
         # 5. Penstock - Straight pressure pipe from forebay to powerhouse

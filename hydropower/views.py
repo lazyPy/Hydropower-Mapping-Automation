@@ -223,20 +223,8 @@ def geojson_site_pairs(request):
                         'geometry': {'type': 'Point', 'coordinates': [lng, lat]},
                         'properties': {'type': 'settling_basin', 'pair_id': pair.pair_id, 'rank': pair.rank, 'elevation_m': round(settling_elevation, 2) if settling_elevation else None}
                     })
-
-                # Connector: Intake -> Settling (short link to visually join intake and settling)
-                if pair.intake_basin_geom and pair.settling_basin_geom:
-                    intake_xy = (pair.intake_basin_geom.x, pair.intake_basin_geom.y)
-                    settling_xy = (pair.settling_basin_geom.x, pair.settling_basin_geom.y)
-                    intake_trans = transformer.transform(intake_xy[0], intake_xy[1])
-                    settling_trans = transformer.transform(settling_xy[0], settling_xy[1])
-                    infrastructure_features.append({
-                        'type': 'Feature',
-                        'geometry': {'type': 'LineString', 'coordinates': [intake_trans, settling_trans]},
-                        'properties': {'type': 'intake_to_settling', 'pair_id': pair.pair_id, 'rank': pair.rank}
-                    })
                 
-                # Channel
+                # Channel (headrace from intake/weir to settling basin)
                 if pair.channel_geom:
                     channel_coords = list(pair.channel_geom.coords)
                     channel_transformed = [transformer.transform(x, y) for x, y in channel_coords]

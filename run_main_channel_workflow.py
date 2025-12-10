@@ -54,28 +54,28 @@ MAIN_CHANNEL_LAYER_NAME = "main_channel"  # Layer name in GeoPackage
 # Get DEM from database (use latest or specify ID)
 RASTER_LAYER_ID = None  # Set to specific ID or None for latest
 
-# HP Node Generation Parameters
-SAMPLING_INTERVAL_M = 250.0  # Sample every 250m along channel (more nodes for gentle slopes)
+# HP Node Generation Parameters - ALIGNED WITH REFERENCE (reference_here.py)
+SAMPLING_INTERVAL_M = 100.0  # Sample every 100m along channel (NODE_SPACING_M from reference)
 
-# Site Pairing Parameters
-PAIRING_DISCHARGE_M3S = 2.0  # Design discharge (m³/s) - adjust based on hydrology
+# Site Pairing Parameters - ALIGNED WITH REFERENCE (reference_here.py)
+PAIRING_DISCHARGE_M3S = 7.0  # Design discharge (m³/s) - CONSTANT_Q_CMS from reference
 PAIRING_CONSTRAINTS = PairingConstraints(
-    min_head_m=5.0,           # Reduced for micro-hydro sites
+    min_head_m=20.0,          # MIN_HEAD_PAIR_M from reference
     max_head_m=500.0,
-    min_distance_m=200.0,
-    max_distance_m=10000.0,   # Increased for gentle slope rivers
+    min_distance_m=20.0,
+    max_distance_m=2000.0,    # PAIR_SEARCH_RADIUS_M from reference
     min_power_kw=5.0,
-    efficiency=0.75,
-    top_n_pairs=50  # Keep top 50 optimal sites
+    efficiency=0.8,           # EFFICIENCY from reference
+    top_n_pairs=200           # TOP_N_PAIRS from reference
 )
 
-# Weir Search Parameters
+# Weir Search Parameters - ALIGNED WITH REFERENCE (reference_here.py)
 WEIR_CONFIG = WeirSearchConfig(
-    search_radius_m=500.0,
-    min_distance_m=100.0,
-    elevation_tolerance_m=20.0,
-    max_candidates_per_inlet=10,
-    cone_angle_deg=90.0,
+    search_radius_m=1500.0,         # WEIR_SEARCH_RADIUS_M from reference
+    min_distance_m=500.0,           # WEIR_MIN_DIST_M from reference
+    elevation_tolerance_m=20.0,     # WEIR_ELEV_TOLERANCE_M from reference
+    max_candidates_per_inlet=3,     # WEIR_MAX_CANDIDATES_PER_IN from reference
+    cone_angle_deg=50.0,            # WEIR_ANGLE_LIMIT_DEG from reference
     pixel_sampling_factor=4
 )
 
