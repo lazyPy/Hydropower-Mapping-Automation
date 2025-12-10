@@ -15,11 +15,13 @@ import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
+from django.conf import settings
 from django.db.models import Max, Avg, Count
 from scipy.spatial import cKDTree
 import geopandas as gpd
 from shapely.geometry import Point, Polygon
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -643,7 +645,7 @@ def get_flow_accumulation_at_point(raster_layer, x: float, y: float) -> Optional
         if not raster_layer or not raster_layer.flow_accumulation_path:
             return None
         
-        flow_acc_path = raster_layer.flow_accumulation_path
+        flow_acc_path = os.path.join(settings.MEDIA_ROOT, raster_layer.flow_accumulation_path)
         
         with rasterio.open(flow_acc_path) as src:
             # Convert coordinates to pixel indices
@@ -683,7 +685,8 @@ def get_max_flow_accumulation(raster_layer) -> Optional[float]:
         if not raster_layer or not raster_layer.flow_accumulation_path:
             return None
         
-        with rasterio.open(raster_layer.flow_accumulation_path) as src:
+        flow_acc_path = os.path.join(settings.MEDIA_ROOT, raster_layer.flow_accumulation_path)
+        with rasterio.open(flow_acc_path) as src:
             flow_acc = src.read(1)
             
             # Mask nodata

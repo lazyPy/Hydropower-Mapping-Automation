@@ -355,6 +355,16 @@
                 <small>Bridges/POIs</small>
                 <span class="legend-count" id="count-bridges">0</span>
             </div>
+            <div class="legend-item" id="legend-diversion">
+                <div class="legend-color" style="background: rgba(99, 102, 241, 0.2); border: 2px dashed #6366f1;"></div>
+                <small>Diversion Zones</small>
+                <span class="legend-count" id="count-diversion">0</span>
+            </div>
+            <div class="legend-item" id="legend-weir-candidates">
+                <div class="legend-color" style="background: #fbbf24; border: 2px solid #f59e0b;"></div>
+                <small>Weir Candidates</small>
+                <span class="legend-count" id="count-weir-candidates">0</span>
+            </div>
         </div>
         
         <!-- Flow Direction Legend (Hidden by default, shown when Flow Direction layer is active) -->
@@ -606,7 +616,9 @@ function loadMapData() {
         loadStreamNetwork(),
         loadWatersheds(),
         loadSubbasins(),
-        loadBridges()
+        loadBridges(),
+        loadDiversionZones(),
+        loadWeirCandidates()
     ]).then(() => {
         if (loadingOverlay) {
             loadingOverlay.classList.add('d-none');
@@ -1195,6 +1207,252 @@ function loadBridges() {
         });
 }
 
+// Load diversion zones layer (similar elevation areas around inlets)
+function loadDiversionZones() {
+    return fetch('{% url "hydropower:geojson_diversion_zones" %}')
+        .then(response => response.json())
+        .then(geojson => {
+            if (!geojson.features || geojson.features.length === 0) {
+                console.log('No diversion zones found');
+                return 0;
+            }
+            
+            const diversionLayer = L.geoJSON(geojson, {
+                style: function(feature) {
+                    const props = feature.properties;
+                    const rank = props.site_pair_rank;
+                    
+                    // Color based on rank (top-ranked sites get more prominent colors)
+                    let color = '#6366f1'; // Default: Indigo
+                    let fillOpacity = 0.2;
+                    
+                    if (rank) {
+                        if (rank === 1) {
+                            color = '#22c55e'; // Green for #1
+                            fillOpacity = 0.35;
+                        } else if (rank <= 3) {
+                            color = '#3b82f6'; // Blue for top 3
+                            fillOpacity = 0.3;
+                        } else if (rank <= 5) {
+                            color = '#8b5cf6'; // Purple for top 5
+                            fillOpacity = 0.25;
+                        }
+                    }
+                    
+                    return {
+                        color: color,
+                        weight: 2,
+                        opacity: 0.8,
+                        fillColor: color,
+                        fillOpacity: fillOpacity,
+                        dashArray: '5, 5' // Dashed border to distinguish from watersheds
+                    };
+                },
+                onEachFeature: function(feature, layer) {
+                    const props = feature.properties;
+                    
+                    const popupContent = `
+                        <div class="popup-content">
+                            <div class="popup-header">
+                                <i class="bi bi-droplet-fill text-primary"></i> Diversion Zone
+                            </div>
+                            <div class="popup-row">
+                                <span class="popup-label">Zone ID:</span>
+                                <span class="popup-value">${props.zone_id}</span>
+                            </div>
+                            <div class="popup-row">
+                                <span class="popup-label">Inlet Site:</span>
+                                <span class="popup-value">${props.inlet_site_id || 'N/A'}</span>
+                            </div>
+                            ${props.site_pair_rank ? `<div class="popup-row"><span class="popup-label">Site Rank:</span><span class="popup-value">#${props.site_pair_rank}</span></div>` : ''}
+                            ${props.site_pair_power_kw ? `<div class="popup-row"><span class="popup-label">Site Power:</span><span class="popup-value">${props.site_pair_power_kw} kW</span></div>` : ''}
+                            <hr class="my-2">
+                            <div class="popup-row">
+                                <span class="popup-label">Reference Elev:</span>
+                                <span class="popup-value">${props.reference_elevation} m</span>
+                            </div>
+                            <div class="popup-row">
+                                <span class="popup-label">Elev Range:</span>
+                                <span class="popup-value">${props.min_elevation} - ${props.max_elevation} m</span>
+                            </div>
+                            <div class="popup-row">
+                                <span class="popup-label">Tolerance:</span>
+                                <span class="popup-value">± ${props.elevation_tolerance} m</span>
+                            </div>
+                            <hr class="my-2">
+                            <div class="popup-row">
+                                <span class="popup-label">Area:</span>
+                                <span class="popup-value">${props.area_hectares.toFixed(2)} ha (${props.area_m2.toFixed(0)} m²)</span>
+                            </div>
+                            <div class="popup-row">
+                                <span class="popup-label">Perimeter:</span>
+                                <span class="popup-value">${props.perimeter_m.toFixed(0)} m</span>
+                            </div>
+                            ${props.mean_slope ? `<div class="popup-row"><span class="popup-label">Mean Slope:</span><span class="popup-value">${props.mean_slope}°</span></div>` : ''}
+                            <div class="popup-row">
+                                <span class="popup-label">Fragments:</span>
+                                <span class="popup-value">${props.fragment_count} ${props.is_contiguous ? '(contiguous)' : '(fragmented)'}</span>
+                            </div>
+                            <div class="popup-row">
+                                <span class="popup-label">Search Radius:</span>
+                                <span class="popup-value">${props.search_radius} m</span>
+                            </div>
+                            <hr class="my-2">
+                            <small class="text-muted">
+                                <i class="bi bi-info-circle"></i> 
+                                This zone shows DEM cells with elevation similar to the inlet,
+                                representing potential water diversion/storage areas.
+                            </small>
+                        </div>
+                    `;
+                    
+                    layer.bindPopup(popupContent, { maxWidth: 350 });
+                    
+                    // Tooltip with basic info
+                    layer.bindTooltip(`${props.zone_id}: ${props.area_hectares.toFixed(2)} ha @ ${props.reference_elevation}m`, {
+                        permanent: false,
+                        direction: 'top'
+                    });
+                }
+            });
+            
+            overlayLayers['Diversion Zones'] = diversionLayer;
+            // Don't add to map by default - it's a specialized layer
+            // diversionLayer.addTo(map);
+            
+            // Removed from layer control - now controlled by Processing Layers sidebar
+            
+            console.log(`Loaded ${geojson.features.length} diversion zones (${geojson.metadata?.total_area_hectares?.toFixed(2) || 'N/A'} ha total)`);
+            return geojson.features.length;
+        })
+        .catch(error => {
+            console.error('Error loading diversion zones:', error);
+            return 0;
+        });
+}
+
+function loadWeirCandidates() {
+    const rasterLayerId = {{ raster_layer_id|default:"null" }};
+    if (!rasterLayerId) {
+        console.log('No raster layer ID, skipping weir candidates');
+        return Promise.resolve(0);
+    }
+    
+    return fetch(`{% url "hydropower:geojson_weir_candidates" %}?raster_layer=${rasterLayerId}&limit=500`)
+        .then(response => response.json())
+        .then(geojson => {
+            if (!geojson.features || geojson.features.length === 0) {
+                console.log('No weir candidates found');
+                return 0;
+            }
+            
+            const weirLayer = L.geoJSON(geojson, {
+                pointToLayer: function(feature, latlng) {
+                    return L.circleMarker(latlng, {
+                        radius: 5,
+                        fillColor: '#fbbf24',
+                        color: '#f59e0b',
+                        weight: 2,
+                        opacity: 1,
+                        fillOpacity: 0.8
+                    });
+                },
+                onEachFeature: function(feature, layer) {
+                    const props = feature.properties;
+                    
+                    // Create line from inlet to weir candidate
+                    const inletLatLng = [props.inlet_lat, props.inlet_lng];
+                    const weirLatLng = [feature.geometry.coordinates[1], feature.geometry.coordinates[0]];
+                    const linkLine = L.polyline([inletLatLng, weirLatLng], {
+                        color: '#f59e0b',
+                        weight: 1,
+                        opacity: 0.5,
+                        dashArray: '3, 3'
+                    });
+                    
+                    // Show link on hover
+                    layer.on('mouseover', function() {
+                        linkLine.addTo(map);
+                    });
+                    layer.on('mouseout', function() {
+                        map.removeLayer(linkLine);
+                    });
+                    
+                    const popupContent = `
+                        <div class="popup-content">
+                            <div class="popup-header">
+                                <i class="bi bi-geo-alt-fill text-warning"></i> Weir Candidate
+                            </div>
+                            <div class="popup-row">
+                                <span class="popup-label">ID:</span>
+                                <span class="popup-value">${props.candidate_id}</span>
+                            </div>
+                            <div class="popup-row">
+                                <span class="popup-label">Inlet:</span>
+                                <span class="popup-value">${props.inlet_node_id}</span>
+                            </div>
+                            <hr class="my-2">
+                            <div class="popup-row">
+                                <span class="popup-label">Elevation:</span>
+                                <span class="popup-value">${props.elevation} m</span>
+                            </div>
+                            <div class="popup-row">
+                                <span class="popup-label">Inlet Elev:</span>
+                                <span class="popup-value">${props.inlet_elevation} m</span>
+                            </div>
+                            <div class="popup-row">
+                                <span class="popup-label">Elev Diff:</span>
+                                <span class="popup-value">${props.elevation_difference > 0 ? '+' : ''}${props.elevation_difference} m</span>
+                            </div>
+                            <hr class="my-2">
+                            <div class="popup-row">
+                                <span class="popup-label">Distance:</span>
+                                <span class="popup-value">${props.distance_from_inlet.toFixed(1)} m from inlet</span>
+                            </div>
+                            ${props.angle_to_outlet_deg ? `<div class="popup-row"><span class="popup-label">Angle to Outlet:</span><span class="popup-value">${props.angle_to_outlet_deg.toFixed(1)}°</span></div>` : ''}
+                            <hr class="my-2">
+                            <div class="popup-row">
+                                <span class="popup-label">Rank:</span>
+                                <span class="popup-value">#${props.rank_within_inlet}</span>
+                            </div>
+                            <div class="popup-row">
+                                <span class="popup-label">Score:</span>
+                                <span class="popup-value">${props.suitability_score ? props.suitability_score.toFixed(1) : 'N/A'}</span>
+                            </div>
+                            <hr class="my-2">
+                            <small class="text-muted">
+                                <i class="bi bi-info-circle"></i> 
+                                Candidate location for water diversion weir/intake structure.
+                                ${props.outlet_count} outlet(s) associated.
+                            </small>
+                        </div>
+                    `;
+                    
+                    layer.bindPopup(popupContent, { maxWidth: 350 });
+                    
+                    layer.bindTooltip(`${props.candidate_id}<br>Rank ${props.rank_within_inlet}`, {
+                        permanent: false,
+                        direction: 'top'
+                    });
+                }
+            });
+            
+            overlayLayers['Weir Candidates'] = weirLayer;
+            weirLayer.addTo(map);
+            
+            // Update legend count
+            const count = geojson.features.length;
+            document.getElementById('count-weir-candidates').textContent = count;
+            
+            console.log(`Loaded ${count} weir candidates`);
+            return count;
+        })
+        .catch(error => {
+            console.error('Error loading weir candidates:', error);
+            return 0;
+        });
+}
+
 // Layer toggle function (called from filter sidebar)
 function toggleMapLayer(layerName, visible) {
     console.log('Toggle layer:', layerName, visible);
@@ -1536,7 +1794,8 @@ function updateLegendCounts() {
         streams: 0,
         watersheds: 0,
         subbasins: 0,
-        bridges: 0
+        bridges: 0,
+        diversion: 0
     };
     
     if (overlayLayers['Stream Network']) {
@@ -1550,6 +1809,9 @@ function updateLegendCounts() {
     }
     if (overlayLayers['Bridges/POIs']) {
         overlayLayers['Bridges/POIs'].eachLayer(() => layerCounts.bridges++);
+    }
+    if (overlayLayers['Diversion Zones']) {
+        overlayLayers['Diversion Zones'].eachLayer(() => layerCounts.diversion++);
     }
     
     // Update layer counts

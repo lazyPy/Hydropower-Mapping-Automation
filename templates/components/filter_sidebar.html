@@ -352,7 +352,8 @@ function loadProcessingLayers() {
                 'STREAM_VECTOR': 'bi-tsunami',
                 'WATERSHED_VECTOR': 'bi-hexagon',
                 'SITE_PAIRS': 'bi-pin-map-fill',
-                'DISCHARGE_RASTER': 'bi-speedometer2'
+                'DISCHARGE_RASTER': 'bi-speedometer2',
+                'DIVERSION_ZONES': 'bi-droplet-fill'
             };
             
             const layerColors = {
@@ -363,7 +364,8 @@ function loadProcessingLayers() {
                 'STREAM_VECTOR': '#0ea5e9',
                 'WATERSHED_VECTOR': '#6366f1',
                 'SITE_PAIRS': '#f59e0b',
-                'DISCHARGE_RASTER': '#06b6d4'
+                'DISCHARGE_RASTER': '#06b6d4',
+                'DIVERSION_ZONES': '#6366f1'
             };
             
             data.processing_steps.forEach((step, idx) => {
@@ -377,7 +379,7 @@ function loadProcessingLayers() {
                 const isRasterLayer = rasterLayers.includes(step.layer_type);
                 
                 // Vector layers that are already loaded
-                const vectorLayers = ['STREAM_VECTOR', 'WATERSHED_VECTOR', 'SUBBASIN', 'BRIDGE_POI', 'INFRASTRUCTURE'];
+                const vectorLayers = ['STREAM_VECTOR', 'WATERSHED_VECTOR', 'SUBBASIN', 'BRIDGE_POI', 'INFRASTRUCTURE', 'DIVERSION_ZONES'];
                 const isVectorLayer = vectorLayers.includes(step.layer_type);
                 
                 // Site pairing layers (toggle site points)
@@ -491,7 +493,8 @@ function toggleProcessingLayer(layerType, isVisible) {
         'INFRASTRUCTURE': 'Infrastructure',  // Match the actual overlayLayers key
         'SITE_PAIRS': 'Site Pairs (Lines)',  // Toggle connecting lines for site pairing
         'DISCHARGE_RASTER': 'Site Points (Inlet/Outlet)',  // Toggle site points for discharge
-        'SITE_POINTS': 'Site Points (Inlet/Outlet)'  // Toggle site points directly
+        'SITE_POINTS': 'Site Points (Inlet/Outlet)',  // Toggle site points directly
+        'DIVERSION_ZONES': 'Diversion Zones'  // Toggle diversion zones (similar elevation areas)
     };
     
     // Raster layers served as tiles

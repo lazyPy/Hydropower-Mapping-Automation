@@ -47,11 +47,13 @@ from django.utils import timezone
 from django.db import transaction
 
 # Project imports
-from hydropower.models import Dataset, RasterLayer, VectorLayer, StreamNetwork, WatershedPolygon, SitePair, HMSRun, TimeSeries
+from hydropower.models import Dataset, RasterLayer, VectorLayer, StreamNetwork, WatershedPolygon, SitePair, HMSRun, TimeSeries, DiversionZone, WeirCandidate
 from hydropower.dem_preprocessing import DEMPreprocessor
 from hydropower.watershed_delineation import WatershedDelineator
 from hydropower.discharge_association import DischargeAssociator, DischargeConfig
 from hydropower.site_pairing import InletOutletPairing, PairingConfig
+from hydropower.diversion_zone import generate_diversion_zones
+from hydropower.weir_search import WeirSearch, WeirSearchConfig
 from hydropower.utils import (
     parse_hms_csv, parse_hms_excel, 
     detect_hms_element_column, detect_hms_discharge_column
@@ -77,7 +79,7 @@ class ConsoleLogger:
     
     def __init__(self, log_file: Optional[str] = None):
         self.step_num = 0
-        self.total_steps = 7  # Actual implemented steps
+        self.total_steps = 10  # Actual implemented steps
         self.start_time = datetime.now()
         
         # Set up file logging
@@ -890,20 +892,23 @@ class DataProcessor:
             streams_gdf.to_file(temp_gpkg, driver='GPKG')
             self.console.info(f"Exported stream network to temporary file")
             
-            # Configure pairing algorithm (optimized for small watersheds)
+            # Configure pairing algorithm (optimized for practical hydropower sites)
             pairing_config = PairingConfig(
                 min_head=5.0,           # Lower for micro-hydro sites
                 max_head=200.0,         # More realistic for small terrain
                 min_river_distance=50.0,    # Shorter minimum distance
                 max_river_distance=2000.0,  # Appropriate scale for small watershed
-                min_stream_order=1,     # Accept first-order streams (headwaters)
+                min_stream_order=1,     # Accept first-order streams (when main_river_only=False)
                 max_candidates_per_type=50,   # Further reduced to 50 inlets/outlets for faster processing
                 max_outlets_per_inlet=3,      # Only check top 3 outlets per inlet
-                efficiency=0.7          # Standard 70% efficiency
+                efficiency=0.7,         # Standard 70% efficiency
+                main_river_only=True,   # Focus on main river stem and major reaches (practical sites)
+                min_main_river_order=2,  # Streams with order ≥2 considered main river (adaptive for small watersheds)
+                min_main_river_length_m=12.0  # Adaptive: uses top 20% if no streams meet threshold
             )
             
-            # Initialize pairing algorithm
-            pairing = InletOutletPairing(config=pairing_config)
+            # Initialize pairing algorithm with raster_layer_id for persisting main river flags
+            pairing = InletOutletPairing(config=pairing_config, raster_layer_id=raster.id)
             
             # Load DEM and streams
             dem_path = str(settings.MEDIA_ROOT / raster.filled_dem_path)
@@ -919,7 +924,7 @@ class DataProcessor:
                 # Use the HEC-HMS subbasin shapefile - more accurate
                 pairing.load_watershed_from_shapefile(str(subbasin_path))
                 if pairing.watershed_gdf is not None:
-                    self.console.info(f"  ✓ Using subbasin shapefile ({pairing.watershed_gdf['area_km2'].sum():.1f} km²)")
+                    self.console.info(f"  [OK] Using subbasin shapefile ({pairing.watershed_gdf['area_km2'].sum():.1f} km²)")
             else:
                 # Fallback to delineated watersheds
                 pairing.load_watershed_polygons(raster.id)
@@ -1086,6 +1091,186 @@ class DataProcessor:
             traceback.print_exc()
             return True  # Non-critical, continue anyway
     
+    def generate_diversion_zones(self, raster: RasterLayer) -> bool:
+        """Step 10: Generate diversion zones around inlet points
+        
+        This implements Step 2 of the hydropower site identification workflow:
+        - For each inlet point in existing site pairs, search the DEM
+        - Find cells with elevation similar to the inlet's elevation
+        - Generate polygon zones representing potential water diversion/storage areas
+        """
+        self.console.step("Generating Diversion Zones (Similar Elevation Search)")
+        
+        try:
+            # Check if we have site pairs
+            site_pairs = SitePair.objects.filter(raster_layer=raster, is_feasible=True)
+            if not site_pairs.exists():
+                self.console.warning("No feasible site pairs found - skipping diversion zones")
+                return True
+            
+            # Clear existing diversion zones for this raster
+            deleted_count = DiversionZone.objects.filter(site_pair__raster_layer=raster).delete()[0]
+            if deleted_count > 0:
+                self.console.info(f"Cleared {deleted_count} existing diversion zones")
+            
+            # Configuration parameters
+            search_radius = 500.0      # 500m search radius around inlet
+            elevation_tolerance = 2.0  # ±2m elevation tolerance
+            
+            self.console.info(f"Configuration:")
+            self.console.info(f"  Search radius: {search_radius}m")
+            self.console.info(f"  Elevation tolerance: ±{elevation_tolerance}m")
+            
+            # Generate diversion zones using the correct function signature
+            result = generate_diversion_zones(
+                raster_layer_id=raster.id,
+                search_radius=search_radius,
+                elevation_tolerance=elevation_tolerance,
+                limit=None  # No limit
+            )
+            
+            if result:
+                zones_generated = result.get('zones_generated', 0)
+                zones_saved = result.get('zones_saved', 0)
+                total_area = result.get('total_area_hectares', 0)
+                
+                self.stats['Diversion Zones'] = zones_saved
+                
+                self.console.info(f"\nDiversion Zone Statistics:")
+                self.console.info(f"  Zones generated: {zones_generated}")
+                self.console.info(f"  Zones saved: {zones_saved}")
+                self.console.info(f"  Total area: {total_area:.2f} hectares")
+                if zones_saved > 0:
+                    self.console.info(f"  Average area: {total_area/zones_saved:.2f} hectares")
+                
+                self.console.success(f"Generated {zones_saved} diversion zones")
+            else:
+                self.console.warning("No diversion zones generated")
+            
+            return True
+            
+        except Exception as e:
+            self.console.error(f"Diversion zone generation failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return True  # Non-critical, continue anyway
+    
+    def search_weir_candidates(self, raster: RasterLayer) -> bool:
+        """Step 11: Search for weir/diversion candidates (Objective 3: HPP Location)
+        
+        This implements Objective 3 (Weir Identification):
+        - Extract inlet nodes from top-ranked IO pairs
+        - For each inlet, search DEM for candidate weir/diversion locations
+        - Apply directional constraint (toward outlet) and elevation tolerance
+        - Generate WeirCandidate records with suitability ranking
+        
+        Output: WeirCandidate points representing potential water intake structures
+        """
+        self.console.step("Searching for Weir/Diversion Candidates (Objective 3)")
+        
+        try:
+            # Check if we have site pairs
+            site_pairs = SitePair.objects.filter(raster_layer=raster, is_feasible=True).order_by('-power')
+            if not site_pairs.exists():
+                self.console.warning("No feasible site pairs found - skipping weir search")
+                return True
+            
+            # Clear existing weir candidates for this raster
+            deleted_count = WeirCandidate.objects.filter(raster_layer=raster).delete()[0]
+            if deleted_count > 0:
+                self.console.info(f"Cleared {deleted_count} existing weir candidates")
+            
+            # Configuration parameters
+            config = WeirSearchConfig(
+                search_radius_m=500.0,        # 500m search radius
+                min_distance_m=100.0,         # Minimum 100m from inlet
+                elevation_tolerance_m=20.0,   # ±20m elevation tolerance
+                max_candidates_per_inlet=10,  # Up to 10 candidates per inlet
+                cone_angle_deg=90.0,          # 90° directional cone half-angle
+                top_n_pairs=50                # Consider top 50 pairs
+            )
+            
+            self.console.info(f"Configuration:")
+            self.console.info(f"  Search radius: {config.search_radius_m}m")
+            self.console.info(f"  Min distance from inlet: {config.min_distance_m}m")
+            self.console.info(f"  Elevation tolerance: ±{config.elevation_tolerance_m}m")
+            self.console.info(f"  Directional cone: {config.cone_angle_deg}° half-angle")
+            self.console.info(f"  Max candidates per inlet: {config.max_candidates_per_inlet}")
+            self.console.info(f"  Top N pairs to consider: {config.top_n_pairs}")
+            
+            # Get top N site pairs
+            top_pairs = site_pairs[:config.top_n_pairs]
+            self.console.info(f"Extracted {len(top_pairs)} top-ranked site pairs")
+            
+            # Convert site pairs to dictionary format
+            pairs_list = []
+            for pair in top_pairs:
+                pairs_list.append({
+                    'pair_id': pair.pair_id,
+                    'inlet_node_id': pair.inlet.id,
+                    'outlet_node_id': pair.outlet.id,
+                    'inlet_x': pair.inlet.geometry.x,
+                    'inlet_y': pair.inlet.geometry.y,
+                    'inlet_elevation': pair.inlet.elevation,
+                    'outlet_x': pair.outlet.geometry.x,
+                    'outlet_y': pair.outlet.geometry.y,
+                    'power_kw': pair.power
+                })
+            
+            # Initialize weir search algorithm
+            weir_search = WeirSearch(config)
+            
+            # Load DEM (use original, not filled - filled has NODATA at stream locations)
+            dem_path = str(settings.MEDIA_ROOT / raster.dataset.file.name)
+            self.console.info(f"Using original DEM: {raster.dataset.file.name}")
+            weir_search.load_dem(dem_path)
+            
+            # Extract top inlets
+            inlet_nodes = weir_search.extract_top_inlets(pairs_list)
+            self.console.info(f"Found {len(inlet_nodes)} unique inlet nodes")
+            
+            # Search for weir candidates
+            weir_candidates = weir_search.search_weir_candidates(inlet_nodes)
+            
+            if len(weir_candidates) == 0:
+                self.console.warning("No weir candidates found")
+                return True
+            
+            # Save to database
+            _, weir_ids = weir_search.save_to_postgis(inlet_nodes, weir_candidates, raster.id)
+            
+            self.stats['Weir Candidates'] = len(weir_ids)
+            
+            # Display statistics
+            self.console.info(f"\nWeir Candidate Statistics:")
+            self.console.info(f"  Total candidates: {len(weir_candidates)}")
+            self.console.info(f"  Unique inlet nodes: {len(inlet_nodes)}")
+            if len(weir_candidates) > 0:
+                avg_dist = sum(c['distance_from_inlet'] for c in weir_candidates) / len(weir_candidates)
+                self.console.info(f"  Average distance from inlet: {avg_dist:.1f}m")
+                
+                # Show distribution by inlet
+                candidates_per_inlet = {}
+                for c in weir_candidates:
+                    inlet_id = c['inlet_node_id']
+                    candidates_per_inlet[inlet_id] = candidates_per_inlet.get(inlet_id, 0) + 1
+                
+                max_candidates = max(candidates_per_inlet.values())
+                min_candidates = min(candidates_per_inlet.values())
+                avg_candidates = len(weir_candidates) / len(inlet_nodes)
+                
+                self.console.info(f"  Candidates per inlet: min={min_candidates}, max={max_candidates}, avg={avg_candidates:.1f}")
+            
+            self.console.success(f"Generated {len(weir_ids)} weir candidates")
+            
+            return True
+            
+        except Exception as e:
+            self.console.error(f"Weir candidate search failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return True  # Non-critical, continue anyway
+    
     def _associate_uniform_discharge(self, raster: RasterLayer, q_outlet: float, hms_run=None) -> bool:
         """Fallback method: Assign uniform discharge to all site pairs (legacy behavior)"""
         from hydropower.site_pairing import calculate_head_losses
@@ -1205,7 +1390,7 @@ class DataProcessor:
                     
                     loaded_count += 1
                     self.console.success(f"  Cached {len(gdf)} features as '{layer_type}' ({geom_type})")
-                    self.console.info(f"    → {cache_file}")
+                    self.console.info(f"      -> {cache_file}")
                     
                 except Exception as e:
                     self.console.warning(f"  Failed to load {shp_path.name}: {e}")
@@ -1259,6 +1444,12 @@ class DataProcessor:
             # Step 9: Associate discharge and calculate power
             self.associate_discharge_and_power(raster)
             
+            # Step 10: Generate diversion zones
+            self.generate_diversion_zones(raster)
+            
+            # Step 11: Search for weir/diversion candidates (Objective 3)
+            self.search_weir_candidates(raster)
+            
             # Success!
             return True
             
@@ -1301,8 +1492,8 @@ def main():
     print(f"{BOLD}Started:{RESET} {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{BOLD}Log file:{RESET} {log_file}")
     print(f"{BOLD}Config:{RESET}")
-    print(f"  • Stream threshold: {args.stream_threshold}")
-    print(f"  • Auto-refresh: Enabled (clears existing data)")
+    print(f"  - Stream threshold: {args.stream_threshold}")
+    print(f"  - Auto-refresh: Enabled (clears existing data)")
     
     # Create processor
     config = {

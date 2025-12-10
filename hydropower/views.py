@@ -31,7 +31,20 @@ def map_view(request):
     - Layer toggles for watersheds, streams, subbasins, bridges
     - Marker clustering for performance with large datasets
     """
-    return render(request, 'map_view.html')
+    from hydropower.models import RasterLayer
+    
+    # Get raster layer ID from query string, or use the most recent one
+    raster_layer_id = request.GET.get('raster_layer', None)
+    if not raster_layer_id:
+        # Default to the most recent raster layer
+        latest_raster = RasterLayer.objects.order_by('-dataset__uploaded_at').first()
+        if latest_raster:
+            raster_layer_id = latest_raster.id
+    
+    context = {
+        'raster_layer_id': raster_layer_id
+    }
+    return render(request, 'map_view.html', context)
 
 
 # ============================================================================
@@ -613,6 +626,251 @@ def geojson_bridges(request):
         return JsonResponse({'error': str(e)}, status=500)
 
 
+@cache_page(60 * 5)  # Cache for 5 minutes
+def geojson_diversion_zones(request):
+    """
+    GeoJSON endpoint for diversion zones (similar elevation areas around inlets).
+    
+    These zones represent areas around each inlet point that have similar elevation,
+    identifying potential water diversion or storage locations at constant head.
+    
+    Returns FeatureCollection with:
+    - MultiPolygon geometry (diversion zone boundaries)
+    - Zone statistics (area, elevation, slope)
+    - CRS transformation: EPSG:32651 → EPSG:4326
+    
+    Query parameters:
+    - raster_layer: Filter by source DEM ID
+    - min_area: Minimum zone area in hectares
+    - max_zones: Maximum number of zones to return (default: 500)
+    - site_pair_id: Filter to zones for a specific site pair
+    """
+    from pyproj import Transformer
+    
+    try:
+        raster_layer_id = request.GET.get('raster_layer')
+        min_area_ha = request.GET.get('min_area', 0)
+        max_zones = request.GET.get('max_zones', 500)
+        site_pair_id = request.GET.get('site_pair_id')
+        
+        # Import model
+        from .models import DiversionZone, SitePair
+        
+        queryset = DiversionZone.objects.select_related('inlet_point').all()
+        
+        # Apply filters
+        if raster_layer_id:
+            queryset = queryset.filter(raster_layer_id=int(raster_layer_id))
+        
+        if float(min_area_ha) > 0:
+            queryset = queryset.filter(area_hectares__gte=float(min_area_ha))
+        
+        if site_pair_id:
+            # Get inlet point for this site pair
+            try:
+                site_pair = SitePair.objects.get(id=int(site_pair_id))
+                queryset = queryset.filter(inlet_point=site_pair.inlet)
+            except SitePair.DoesNotExist:
+                pass
+        
+        # Order by area (largest first) and limit
+        queryset = queryset.order_by('-area_hectares')[:int(max_zones)]
+        
+        # CRS transformer
+        transformer = Transformer.from_crs('EPSG:32651', 'EPSG:4326', always_xy=True)
+        
+        features = []
+        for zone in queryset:
+            # Transform geometry
+            from shapely import wkb
+            from shapely.ops import transform
+            import json
+            
+            # Convert GeoDjango geometry to Shapely
+            geom_shapely = wkb.loads(bytes(zone.geometry.wkb))
+            
+            # Transform coordinates
+            geom_transformed = transform(transformer.transform, geom_shapely)
+            
+            # Convert to GeoJSON dict
+            geom_dict = json.loads(json.dumps(geom_transformed.__geo_interface__))
+            
+            # Transform centroid
+            centroid_lng, centroid_lat = None, None
+            if zone.centroid:
+                centroid_lng, centroid_lat = transformer.transform(zone.centroid.x, zone.centroid.y)
+            
+            # Get associated site pair rank if exists
+            site_pair_rank = None
+            site_pair_power = None
+            try:
+                site_pair = SitePair.objects.filter(inlet=zone.inlet_point).first()
+                if site_pair:
+                    site_pair_rank = site_pair.rank
+                    site_pair_power = site_pair.power
+            except:
+                pass
+            
+            feature = {
+                'type': 'Feature',
+                'geometry': geom_dict,
+                'properties': {
+                    'id': zone.id,
+                    'zone_id': zone.zone_id,
+                    'inlet_site_id': zone.inlet_point.site_id if zone.inlet_point else None,
+                    'reference_elevation': round(zone.reference_elevation, 2),
+                    'elevation_tolerance': zone.elevation_tolerance,
+                    'search_radius': zone.search_radius,
+                    'min_elevation': round(zone.min_elevation, 2),
+                    'max_elevation': round(zone.max_elevation, 2),
+                    'mean_elevation': round(zone.mean_elevation, 2),
+                    'area_m2': round(zone.area_m2, 2),
+                    'area_hectares': round(zone.area_hectares, 4),
+                    'perimeter_m': round(zone.perimeter_m, 2),
+                    'pixel_count': zone.pixel_count,
+                    'mean_slope': round(zone.mean_slope, 2) if zone.mean_slope else None,
+                    'max_slope': round(zone.max_slope, 2) if zone.max_slope else None,
+                    'is_contiguous': zone.is_contiguous,
+                    'fragment_count': zone.fragment_count,
+                    'suitability_score': round(zone.suitability_score, 2) if zone.suitability_score else None,
+                    'centroid_lat': round(centroid_lat, 6) if centroid_lat else None,
+                    'centroid_lng': round(centroid_lng, 6) if centroid_lng else None,
+                    'site_pair_rank': site_pair_rank,
+                    'site_pair_power_kw': round(site_pair_power, 2) if site_pair_power else None,
+                }
+            }
+            features.append(feature)
+        
+        geojson = {
+            'type': 'FeatureCollection',
+            'crs': {
+                'type': 'name',
+                'properties': {'name': 'EPSG:4326'}
+            },
+            'features': features,
+            'metadata': {
+                'total_zones': len(features),
+                'total_area_hectares': sum(f['properties']['area_hectares'] for f in features)
+            }
+        }
+        
+        return JsonResponse(geojson, safe=False)
+        
+    except Exception as e:
+        logger.error(f"Error generating diversion zones GeoJSON: {str(e)}", exc_info=True)
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+def geojson_weir_candidates(request):
+    """
+    GeoJSON endpoint for weir/diversion candidates (Objective 3).
+    
+    These points represent potential water intake/weir locations near inlet nodes,
+    identified by searching the DEM with directional constraints toward outlets.
+    
+    Returns FeatureCollection with:
+    - Point geometry (weir candidate locations)
+    - Candidate metadata (elevation, distance, ranking)
+    - CRS transformation: EPSG:32651 → EPSG:4326
+    
+    Query parameters:
+    - raster_layer: Filter by source DEM ID
+    - inlet_node_id: Filter to candidates for a specific inlet
+    - min_rank: Minimum suitability rank (1=best)
+    - max_candidates: Maximum number of candidates to return (default: 500)
+    """
+    from pyproj import Transformer
+    
+    try:
+        raster_layer_id = request.GET.get('raster_layer')
+        inlet_node_id = request.GET.get('inlet_node_id')
+        min_rank = request.GET.get('min_rank', 1)
+        max_candidates = request.GET.get('max_candidates', 500)
+        
+        # Import model
+        from .models import WeirCandidate
+        
+        queryset = WeirCandidate.objects.select_related('inlet_point').all()
+        
+        # Apply filters
+        if raster_layer_id:
+            queryset = queryset.filter(raster_layer_id=int(raster_layer_id))
+        
+        if inlet_node_id:
+            queryset = queryset.filter(inlet_node_id=inlet_node_id)
+        
+        if int(min_rank) > 1:
+            queryset = queryset.filter(rank_within_inlet__lte=int(min_rank))
+        
+        # Order by rank and limit
+        queryset = queryset.order_by('inlet_point', 'rank_within_inlet')[:int(max_candidates)]
+        
+        # CRS transformer
+        transformer = Transformer.from_crs('EPSG:32651', 'EPSG:4326', always_xy=True)
+        
+        features = []
+        for candidate in queryset:
+            # Transform geometry
+            weir_lng, weir_lat = transformer.transform(candidate.geometry.x, candidate.geometry.y)
+            inlet_lng, inlet_lat = transformer.transform(candidate.inlet_point.geometry.x, candidate.inlet_point.geometry.y)
+            
+            feature = {
+                'type': 'Feature',
+                'geometry': {
+                    'type': 'Point',
+                    'coordinates': [weir_lng, weir_lat]
+                },
+                'properties': {
+                    'id': candidate.id,
+                    'candidate_id': candidate.candidate_id,
+                    'inlet_node_id': candidate.inlet_node_id,
+                    'inlet_point_id': candidate.inlet_point.site_id if candidate.inlet_point else None,
+                    'elevation': round(candidate.elevation, 2),
+                    'inlet_elevation': round(candidate.inlet_elevation, 2),
+                    'elevation_difference': round(candidate.elevation_difference, 2),
+                    'distance_from_inlet': round(candidate.distance_from_inlet, 2),
+                    'angle_to_outlet_deg': round(candidate.angle_to_outlet_deg, 2) if candidate.angle_to_outlet_deg else None,
+                    'is_toward_outlet': candidate.is_toward_outlet,
+                    'outlet_count': candidate.outlet_count,
+                    'outlet_node_ids': candidate.outlet_node_ids,
+                    'pair_count': candidate.pair_count,
+                    'pair_ids_list': candidate.pair_ids_list,
+                    'suitability_score': round(candidate.suitability_score, 2) if candidate.suitability_score else None,
+                    'rank_within_inlet': candidate.rank_within_inlet,
+                    'search_radius': candidate.search_radius,
+                    'elevation_tolerance': candidate.elevation_tolerance,
+                    'min_distance': candidate.min_distance,
+                    'cone_angle_deg': candidate.cone_angle_deg,
+                    # Inlet coordinates for drawing links
+                    'inlet_lng': round(inlet_lng, 6),
+                    'inlet_lat': round(inlet_lat, 6),
+                    # Weir coordinates
+                    'weir_lng': round(weir_lng, 6),
+                    'weir_lat': round(weir_lat, 6),
+                }
+            }
+            features.append(feature)
+        
+        geojson = {
+            'type': 'FeatureCollection',
+            'crs': {
+                'type': 'name',
+                'properties': {'name': 'EPSG:4326'}
+            },
+            'features': features,
+            'metadata': {
+                'total_candidates': len(features),
+                'unique_inlets': len(set(f['properties']['inlet_node_id'] for f in features))
+            }
+        }
+        
+        return JsonResponse(geojson, safe=False)
+        
+    except Exception as e:
+        logger.error(f"Error generating weir candidates GeoJSON: {str(e)}", exc_info=True)
+        return JsonResponse({'error': str(e)}, status=500)
+
+
 # ============================================================================
 # Processing Layers API - For HEC-HMS-style Layer Visualization
 # ============================================================================
@@ -777,6 +1035,15 @@ def api_processing_status(request):
                 'has_layer': bool(raster.discharge_raster_path),
                 'layer_type': 'DISCHARGE_RASTER',
                 'description': f'Spatially-varying discharge (Q_outlet={raster.discharge_q_outlet or "N/A"} m³/s)'
+            },
+            {
+                'step': 10,
+                'name': 'Diversion Zones',
+                'status': 'completed' if raster.diversion_zones.exists() else 'not_started',
+                'has_layer': raster.diversion_zones.exists(),
+                'layer_type': 'DIVERSION_ZONES',
+                'count': raster.diversion_zones.count(),
+                'description': f'{raster.diversion_zones.count()} diversion zones (similar elevation areas around inlets)'
             },
         ]
         

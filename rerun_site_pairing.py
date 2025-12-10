@@ -1,4 +1,4 @@
-"""
+r"""
 Re-run Site Pairing with Updated Configuration
 
 This script re-runs the inlet-outlet pairing algorithm with the updated
@@ -95,8 +95,8 @@ def main():
     
     print(f"\nLoading DEM: {dem_path}")
     
-    # Create pairing instance
-    pairing = InletOutletPairing(config=config)
+    # Create pairing instance with raster_layer_id for persisting main river flags
+    pairing = InletOutletPairing(config=config, raster_layer_id=raster_layer.id)
     
     # Load DEM data
     pairing.load_dem(dem_path)
@@ -134,7 +134,7 @@ def main():
     pairing.load_watershed_polygons(raster_layer.id)
     if pairing.watershed_gdf is not None:
         print(f"Loaded {len(pairing.watershed_gdf)} watershed polygons")
-        print("✓ Sites will be constrained to watershed boundaries")
+        print("[OK] Sites will be constrained to watershed boundaries")
     else:
         print("WARNING: No watershed boundaries found - sites may fall outside basin")
     

@@ -48,7 +48,7 @@ class SpatialDischargeCalculator:
         self.flow_acc_path = None
         self.flow_acc_data = None
         self.flow_acc_transform = None
-        self.flow_acc_nodata = None
+        self.flow_acc_nodata = None 
         self.max_flow_acc = None
         self.cell_size = None
         self.basin_area_km2 = None

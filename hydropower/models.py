@@ -316,6 +316,7 @@ class StreamNetwork(models.Model):
     # Stream attributes
     length_m = models.FloatField(help_text="Stream segment length in meters")
     stream_order = models.IntegerField(default=1, help_text="Strahler or Shreve stream order")
+    is_main_river = models.BooleanField(default=False, help_text="Part of main river stem or major reach (for practical site selection)")
     
     # Topology fields
     from_node = models.IntegerField(default=0, help_text="Upstream node ID")
@@ -337,6 +338,7 @@ class StreamNetwork(models.Model):
             models.Index(fields=['raster_layer', 'stream_order']),
             models.Index(fields=['from_node', 'to_node']),
             models.Index(fields=['stream_order', 'is_outlet']),
+            models.Index(fields=['is_main_river']),
         ]
     
     def __str__(self):
@@ -529,6 +531,16 @@ class SitePair(gis_models.Model):
     # Processing metadata
     created_at = models.DateTimeField(default=timezone.now)
     
+    # Diversion Zone reference (Step 2 of objective - similar elevation search)
+    diversion_zone = models.OneToOneField(
+        'DiversionZone',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='site_pair',
+        help_text="Associated diversion zone (similar elevation area around inlet)"
+    )
+    
     class Meta:
         db_table = "site_pairs"
         verbose_name = "Site Pair"
@@ -563,6 +575,193 @@ class SitePair(gis_models.Model):
             self.power = power_watts / 1000.0
             return self.power
         return None
+
+
+class DiversionZone(gis_models.Model):
+    """
+    Model for water diversion/storage zones around inlet points.
+    
+    This implements Step 2 of the hydropower site identification workflow:
+    - For each inlet point, search the DEM in a local neighborhood
+    - Find DEM cells with elevation similar to the inlet's elevation
+    - These zones represent areas where water could be diverted/stored at that head
+    
+    The result is a polygon (or multipolygon) representing the "similar elevation"
+    area around each inlet, useful for identifying:
+    - Potential intake/weir locations
+    - Natural storage/reservoir areas
+    - Water diversion corridors at constant head
+    """
+    
+    # Link to source raster layer (DEM)
+    raster_layer = models.ForeignKey(
+        'RasterLayer',
+        on_delete=models.CASCADE,
+        related_name='diversion_zones',
+        help_text="Source DEM used for elevation analysis"
+    )
+    
+    # Link to inlet point
+    inlet_point = models.ForeignKey(
+        'SitePoint',
+        on_delete=models.CASCADE,
+        related_name='diversion_zones',
+        help_text="Inlet point around which the zone was computed"
+    )
+    
+    # Zone identification
+    zone_id = models.CharField(max_length=100, unique=True, help_text="Unique zone identifier (e.g., 'DZ_INLET_001')")
+    
+    # Geometry - the polygon representing similar elevation area
+    geometry = gis_models.MultiPolygonField(srid=32651, help_text="Diversion zone polygon(s) (UTM Zone 51N)")
+    centroid = gis_models.PointField(srid=32651, null=True, blank=True, help_text="Zone centroid")
+    
+    # Elevation parameters
+    reference_elevation = models.FloatField(help_text="Reference elevation of inlet point (m)")
+    elevation_tolerance = models.FloatField(default=2.0, help_text="Elevation tolerance used for search (m)")
+    min_elevation = models.FloatField(help_text="Minimum elevation within zone (m)")
+    max_elevation = models.FloatField(help_text="Maximum elevation within zone (m)")
+    mean_elevation = models.FloatField(help_text="Mean elevation within zone (m)")
+    
+    # Search parameters
+    search_radius = models.FloatField(default=500.0, help_text="Search radius around inlet point (m)")
+    
+    # Zone statistics
+    area_m2 = models.FloatField(help_text="Zone area in square meters")
+    area_hectares = models.FloatField(help_text="Zone area in hectares")
+    perimeter_m = models.FloatField(help_text="Zone perimeter in meters")
+    pixel_count = models.IntegerField(help_text="Number of DEM pixels in zone")
+    
+    # Slope statistics within zone
+    mean_slope = models.FloatField(null=True, blank=True, help_text="Mean slope within zone (degrees)")
+    max_slope = models.FloatField(null=True, blank=True, help_text="Maximum slope within zone (degrees)")
+    
+    # Suitability assessment
+    is_contiguous = models.BooleanField(default=True, help_text="Whether zone is a single contiguous area")
+    fragment_count = models.IntegerField(default=1, help_text="Number of separate fragments")
+    largest_fragment_area_m2 = models.FloatField(null=True, blank=True, help_text="Area of largest contiguous fragment")
+    
+    # Proximity to stream
+    distance_to_stream = models.FloatField(null=True, blank=True, help_text="Distance from zone centroid to nearest stream (m)")
+    
+    # Classification
+    suitability_score = models.FloatField(null=True, blank=True, help_text="Suitability score for water diversion (0-100)")
+    
+    # Processing metadata
+    created_at = models.DateTimeField(default=timezone.now)
+    processing_time_seconds = models.FloatField(null=True, blank=True, help_text="Time to compute this zone")
+    
+    class Meta:
+        db_table = "diversion_zones"
+        verbose_name = "Diversion Zone"
+        verbose_name_plural = "Diversion Zones"
+        ordering = ['-area_m2']
+        indexes = [
+            models.Index(fields=['raster_layer', 'inlet_point']),
+            models.Index(fields=['reference_elevation']),
+            models.Index(fields=['area_m2']),
+            models.Index(fields=['suitability_score']),
+        ]
+    
+    def __str__(self):
+        return f"{self.zone_id} (Elev: {self.reference_elevation:.1f}m, Area: {self.area_hectares:.2f} ha)"
+
+
+class WeirCandidate(gis_models.Model):
+    """
+    Model for candidate weir/diversion locations near inlet points.
+    
+    This implements Objective 3 (Weir Identification):
+    - For each high-ranked inlet point, search the DEM for candidate weir locations
+    - Candidates must be within a search radius and elevation tolerance
+    - Directional constraint: candidates must be toward the outlet (hydraulically feasible)
+    - Each candidate represents a potential water intake/weir structure location
+    
+    The weir search refines IO pairs into concrete infrastructure layouts:
+    - Water abstracted at weir → routed through headrace/penstock → discharged at outlet
+    - Ensures hydraulic compatibility with the original IO pair's Q, H, and P calculations
+    """
+    
+    # Link to source raster layer (DEM)
+    raster_layer = models.ForeignKey(
+        'RasterLayer',
+        on_delete=models.CASCADE,
+        related_name='weir_candidates',
+        help_text="Source DEM used for weir search"
+    )
+    
+    # Link to inlet point (from top-ranked IO pairs)
+    inlet_point = models.ForeignKey(
+        'SitePoint',
+        on_delete=models.CASCADE,
+        related_name='weir_candidates',
+        help_text="Inlet point around which weir candidates were searched"
+    )
+    
+    # Link to associated site pairs (an inlet may belong to multiple high-ranked pairs)
+    site_pairs = models.ManyToManyField(
+        'SitePair',
+        related_name='weir_candidates',
+        help_text="High-ranked IO pairs that use this inlet"
+    )
+    
+    # Weir candidate identification
+    candidate_id = models.CharField(max_length=100, help_text="Unique candidate identifier (e.g., 'WEIR_IN_97_79_001')")
+    
+    # Geometry - the point representing the candidate weir location
+    geometry = gis_models.PointField(srid=32651, help_text="Weir candidate location (UTM Zone 51N)")
+    
+    # Elevation at weir candidate
+    elevation = models.FloatField(help_text="DEM elevation at weir candidate (m)")
+    
+    # Relationship to inlet
+    distance_from_inlet = models.FloatField(help_text="Distance from inlet point to weir candidate (m)")
+    elevation_difference = models.FloatField(help_text="Elevation difference: candidate - inlet (m)")
+    
+    # Inlet metadata (cached for performance)
+    inlet_elevation = models.FloatField(help_text="Inlet elevation (m)")
+    inlet_node_id = models.CharField(max_length=100, help_text="Inlet node ID")
+    
+    # Associated outlets metadata (for directional constraint validation)
+    outlet_count = models.IntegerField(default=0, help_text="Number of outlets associated with this inlet")
+    outlet_node_ids = models.TextField(blank=True, help_text="Comma-separated outlet node IDs")
+    
+    # Directional constraint metadata
+    is_toward_outlet = models.BooleanField(default=True, help_text="Whether candidate is in direction toward outlet(s)")
+    angle_to_outlet_deg = models.FloatField(null=True, blank=True, help_text="Angle from inlet to candidate toward outlet (degrees)")
+    
+    # Associated pairs metadata
+    pair_count = models.IntegerField(default=0, help_text="Number of high-ranked pairs using this inlet")
+    pair_ids_list = models.TextField(blank=True, help_text="Comma-separated pair IDs")
+    
+    # Ranking/scoring
+    suitability_score = models.FloatField(null=True, blank=True, help_text="Suitability score for weir location (0-100)")
+    rank_within_inlet = models.IntegerField(null=True, blank=True, help_text="Rank among candidates for this inlet (1=best)")
+    
+    # Search parameters used
+    search_radius = models.FloatField(default=500.0, help_text="Search radius used (m)")
+    elevation_tolerance = models.FloatField(default=20.0, help_text="Elevation tolerance used (m)")
+    min_distance = models.FloatField(default=100.0, help_text="Minimum distance from inlet (m)")
+    cone_angle_deg = models.FloatField(default=90.0, help_text="Directional cone half-angle (degrees)")
+    
+    # Processing metadata
+    created_at = models.DateTimeField(default=timezone.now)
+    
+    class Meta:
+        db_table = "weir_candidates"
+        verbose_name = "Weir Candidate"
+        verbose_name_plural = "Weir Candidates"
+        ordering = ['inlet_point', 'rank_within_inlet']
+        indexes = [
+            models.Index(fields=['raster_layer', 'inlet_point']),
+            models.Index(fields=['inlet_node_id']),
+            models.Index(fields=['suitability_score']),
+            models.Index(fields=['distance_from_inlet']),
+            models.Index(fields=['rank_within_inlet']),
+        ]
+    
+    def __str__(self):
+        return f"{self.candidate_id} (Elev: {self.elevation:.1f}m, Dist: {self.distance_from_inlet:.0f}m)"
 
 
 class ProcessingRun(models.Model):

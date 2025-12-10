@@ -121,11 +121,11 @@ class PairingConfig:
     """Configuration parameters for inlet-outlet pairing algorithm"""
     
     # Head constraints - LOWERED for micro/small hydro potential
-    min_head: float = 3.0  # meters (was 10.0, now captures micro-hydro)
+    min_head: float = 5.0  # meters (was 10.0, lowered for micro-hydro)
     max_head: float = 500.0  # meters
     
     # Distance constraints - EXPANDED for more site discovery
-    min_river_distance: float = 50.0  # meters (was 100.0)
+    min_river_distance: float = 20.0  # meters (was 50.0, lowered for short streams)
     max_river_distance: float = 8000.0  # meters (was 5000.0)
     
     # Spacing and buffer
@@ -159,6 +159,18 @@ class PairingConfig:
     # Search parameters
     max_outlets_per_inlet: int = 15  # Maximum outlets per inlet (was 10)
     min_stream_order: int = 1  # Minimum Strahler order (was 2, now captures all streams)
+    main_river_only: bool = True  # Focus on main river stem/major reaches (practical sites)
+    min_main_river_order: int = 2  # Minimum stream order to consider as "main river" (when main_river_only=True)
+    min_main_river_length_m: float = 12.0  # Minimum stream length (meters) - will use top 20% if no streams meet threshold
+    
+    # Node densification parameters (for systematic IO pairing)
+    node_spacing: float = 50.0  # Spacing between nodes along channel (meters, was 100.0)
+    use_node_densification: bool = True  # Enable systematic node-based pairing
+    
+    # Flow accumulation parameters (for pair-specific discharge)
+    use_flow_accumulation: bool = False  # Use FA raster for discharge calculation
+    q_outlet_design: Optional[float] = None  # Design Q at outlet for FA calibration (m³/s)
+    constant_q_fallback: float = 7.0  # Fallback Q if FA not available (m³/s)
     
     # Land feasibility parameters
     max_slope_percent: float = 45.0  # Maximum terrain slope for infrastructure (was 30%)
@@ -198,12 +210,13 @@ class InletOutletPairing:
     9. Save to PostGIS
     """
     
-    def __init__(self, config: Optional[PairingConfig] = None):
+    def __init__(self, config: Optional[PairingConfig] = None, raster_layer_id: Optional[int] = None):
         """
         Initialize the pairing algorithm.
         
         Args:
             config: PairingConfig object with algorithm parameters
+            raster_layer_id: ID of RasterLayer in database (for persisting main river flags)
         """
         self.config = config or PairingConfig()
         self.config.validate_weights()  # Validate and normalize weights
@@ -218,6 +231,11 @@ class InletOutletPairing:
         self.stream_spatial_index = None  # STRtree for stream distance queries
         self.watershed_polygons = None  # Watershed polygons from database
         self.watershed_gdf = None  # GeoDataFrame of watershed polygons for spatial queries
+        self.flowacc_path = None  # Flow accumulation raster path
+        self.flowacc_array = None  # Flow accumulation array
+        self.flowacc_transform = None  # Flow accumulation transform
+        self.q_scale = None  # Q scale factor (m³/s per FA unit)
+        self.raster_layer_id = raster_layer_id  # For persisting main river flags to database
         
     def load_dem(self, dem_path: str):
         """
@@ -232,6 +250,91 @@ class InletOutletPairing:
             self.dem_transform = src.transform
             self.dem_crs = src.crs
             logger.info(f"Loaded DEM: {src.width}x{src.height}, CRS={src.crs}")
+    
+    def load_flow_accumulation(self, flowacc_path: str, outlet_point: Optional[Point] = None):
+        """
+        Load flow accumulation raster and calibrate Q scale factor.
+        
+        Args:
+            flowacc_path: Path to flow accumulation GeoTIFF
+            outlet_point: Outlet point for calibration (optional)
+        """
+        self.flowacc_path = flowacc_path
+        with rasterio.open(flowacc_path) as src:
+            self.flowacc_array = src.read(1)
+            self.flowacc_transform = src.transform
+            logger.info(f"Loaded Flow Accumulation: {src.width}x{src.height}")
+        
+        # Calibrate Q scale from outlet if provided
+        if outlet_point and self.config.q_outlet_design:
+            fa_outlet = self._extract_from_raster(
+                outlet_point.x, outlet_point.y,
+                self.flowacc_array, self.flowacc_transform
+            )
+            if fa_outlet and fa_outlet > 0:
+                self.q_scale = self.config.q_outlet_design / fa_outlet
+                logger.info(
+                    f"Calibrated Q scale: FA_outlet={fa_outlet:.1f}, "
+                    f"Q_outlet={self.config.q_outlet_design:.3f} m³/s, "
+                    f"Q_scale={self.q_scale:.6f} m³/s per FA unit"
+                )
+            else:
+                logger.warning("Failed to sample FA at outlet, using constant Q fallback")
+                self.q_scale = None
+        else:
+            logger.info("No outlet calibration provided, will use constant Q fallback")
+            self.q_scale = None
+    
+    def _extract_from_raster(self, x: float, y: float, 
+                            array: np.ndarray, transform) -> Optional[float]:
+        """
+        Extract value from raster at given coordinates.
+        
+        Args:
+            x: X coordinate
+            y: Y coordinate
+            array: Raster array
+            transform: Raster transform
+        
+        Returns:
+            Raster value, or None if outside bounds
+        """
+        try:
+            row, col = rowcol(transform, x, y)
+            if 0 <= row < array.shape[0] and 0 <= col < array.shape[1]:
+                value = float(array[row, col])
+                if value < -9999:  # Nodata
+                    return None
+                return value
+            return None
+        except Exception as e:
+            logger.debug(f"Error extracting from raster: {e}")
+            return None
+    
+    def compute_discharge_at_point(self, point: Point) -> float:
+        """
+        Compute discharge at a point using flow accumulation and calibrated Q scale.
+        
+        Falls back to constant Q if FA not available or calibration failed.
+        
+        Args:
+            point: Shapely Point geometry
+        
+        Returns:
+            Discharge in m³/s
+        """
+        if self.config.use_flow_accumulation and self.q_scale and self.flowacc_array is not None:
+            fa_val = self._extract_from_raster(
+                point.x, point.y,
+                self.flowacc_array, self.flowacc_transform
+            )
+            if fa_val and fa_val > 0:
+                q_computed = fa_val * self.q_scale
+                logger.debug(f"Computed Q at ({point.x:.1f}, {point.y:.1f}): FA={fa_val:.1f}, Q={q_computed:.3f} m³/s")
+                return max(0.1, q_computed)  # Minimum 0.1 m³/s
+        
+        # Fallback to constant Q
+        return self.config.constant_q_fallback
     
     def load_stream_network(self, streams_path: str, nodes_path: Optional[str] = None):
         """
@@ -251,11 +354,20 @@ class InletOutletPairing:
         # Build network graph for connectivity analysis
         self._build_stream_graph()
         
-        # Calculate stream order if missing
-        self._calculate_stream_order_if_missing()
+        # Calculate stream order if missing (skip if causing issues with circular graphs)
+        try:
+            self._calculate_stream_order_if_missing()
+        except RecursionError:
+            logger.warning("Stream order calculation failed (circular graph), using existing values or defaults")
+            if 'stream_order' not in self.stream_network.columns:
+                self.stream_network['stream_order'] = 1
         
         # Build spatial index for efficient queries
         self._build_spatial_index()
+        
+        # Identify main river segments if main_river_only is enabled
+        if self.config.main_river_only:
+            self._identify_main_river_segments()
     
     def load_watershed_polygons(self, raster_layer_id: int):
         """
@@ -378,11 +490,208 @@ class InletOutletPairing:
         
         logger.info(f"Built stream graph: {self.stream_graph.number_of_nodes()} nodes, {self.stream_graph.number_of_edges()} edges")
     
+    def _identify_main_river_segments(self):
+        """
+        Identify main river segments (longest flow path + high-order reaches).
+        
+        Strategy:
+        1. Find outlet node (most downstream point)
+        2. Trace longest path from outlet to source
+        3. Mark all segments on longest path as is_main_river=True
+        4. Also mark high-order reaches (stream_order >= min_main_river_order)
+        
+        This focuses IO pairing on practical locations where real plants would be built:
+        - Main river stem has reliable discharge
+        - Geomorphically stable
+        - Better access for construction
+        - More realistic for investment
+        """
+        logger.info("Identifying main river segments...")
+        
+        # Find outlet node (node with no outgoing edges)
+        outlet_nodes = [n for n in self.stream_graph.nodes() if self.stream_graph.out_degree(n) == 0]
+        
+        if not outlet_nodes:
+            logger.warning("No outlet node found in stream graph, marking high-order streams as main river")
+            self._mark_high_order_as_main_river()
+            return
+        
+        # If multiple outlets, use the one with highest contributing area (longest path)
+        main_outlet = outlet_nodes[0]
+        if len(outlet_nodes) > 1:
+            logger.info(f"Multiple outlet nodes found ({len(outlet_nodes)}), selecting main outlet by longest path")
+            # Select outlet with longest upstream path
+            max_path_length = 0
+            for outlet in outlet_nodes:
+                try:
+                    # Find longest path to this outlet
+                    source_nodes = [n for n in self.stream_graph.nodes() if self.stream_graph.in_degree(n) == 0]
+                    for source in source_nodes:
+                        if nx.has_path(self.stream_graph, source, outlet):
+                            path_length = nx.shortest_path_length(self.stream_graph, source, outlet, weight='length')
+                            if path_length > max_path_length:
+                                max_path_length = path_length
+                                main_outlet = outlet
+                except (nx.NetworkXNoPath, nx.NetworkXError):
+                    continue
+        
+        logger.info(f"Main outlet node: {main_outlet}")
+        
+        # Find longest path from source to outlet
+        source_nodes = [n for n in self.stream_graph.nodes() if self.stream_graph.in_degree(n) == 0]
+        longest_path = []
+        max_length = 0
+        
+        for source in source_nodes:
+            try:
+                if nx.has_path(self.stream_graph, source, main_outlet):
+                    # Use all simple paths and find longest
+                    for path in nx.all_simple_paths(self.stream_graph, source, main_outlet):
+                        path_length = sum(
+                            self.stream_graph[path[i]][path[i+1]]['length'] 
+                            for i in range(len(path)-1)
+                        )
+                        if path_length > max_length:
+                            max_length = path_length
+                            longest_path = path
+            except (nx.NetworkXNoPath, nx.NetworkXError, RecursionError) as e:
+                logger.debug(f"Path finding failed for source {source}: {e}")
+                continue
+        
+        if not longest_path:
+            logger.warning("Could not find longest path, marking high-order streams as main river")
+            self._mark_high_order_as_main_river()
+            return
+        
+        logger.info(f"Longest flow path: {len(longest_path)-1} segments, {max_length:.1f} m")
+        
+        # Mark segments on longest path as is_main_river=True
+        main_river_stream_ids = set()
+        for i in range(len(longest_path)-1):
+            edge_data = self.stream_graph[longest_path[i]][longest_path[i+1]]
+            stream_id = edge_data.get('stream_id')
+            if stream_id is not None:
+                main_river_stream_ids.add(stream_id)
+        
+        # Also mark high-order reaches as main river (major tributaries)
+        if 'stream_order' in self.stream_network.columns:
+            high_order_mask = self.stream_network['stream_order'] >= self.config.min_main_river_order
+            high_order_ids = set(self.stream_network[high_order_mask].index)
+            main_river_stream_ids.update(high_order_ids)
+            logger.info(f"Added {len(high_order_ids)} high-order reaches (order >= {self.config.min_main_river_order})")
+        
+        # Also mark long stream segments as main river (significant channels)
+        if 'length_m' in self.stream_network.columns:
+            long_stream_mask = self.stream_network['length_m'] >= self.config.min_main_river_length_m
+            long_stream_ids = set(self.stream_network[long_stream_mask].index)
+            added_long = long_stream_ids - main_river_stream_ids  # Only count new additions
+            main_river_stream_ids.update(long_stream_ids)
+            logger.info(f"Added {len(added_long)} long reaches (length >= {self.config.min_main_river_length_m}m)")
+        
+        # Set is_main_river column
+        self.stream_network['is_main_river'] = False
+        self.stream_network.loc[list(main_river_stream_ids), 'is_main_river'] = True
+        
+        main_river_count = self.stream_network['is_main_river'].sum()
+        main_river_length = self.stream_network[self.stream_network['is_main_river']]['length_m'].sum()
+        total_length = self.stream_network['length_m'].sum()
+        
+        logger.info(f"Identified main river network: {main_river_count} segments ({main_river_count/len(self.stream_network)*100:.1f}%), "
+                   f"{main_river_length/1000:.1f} km ({main_river_length/total_length*100:.1f}% of total)")
+        
+        # Persist is_main_river flag to database
+        self._persist_main_river_to_db()
+    
+    def _mark_high_order_as_main_river(self):
+        """Fallback: mark high-order or long streams as main river if path finding fails"""
+        import pandas as pd
+        main_river_mask = pd.Series([False] * len(self.stream_network), index=self.stream_network.index)
+        
+        # Try stream order first
+        if 'stream_order' in self.stream_network.columns:
+            order_mask = self.stream_network['stream_order'] >= self.config.min_main_river_order
+            main_river_mask |= order_mask
+            logger.info(f"Marked {order_mask.sum()} high-order streams (order >= {self.config.min_main_river_order})")
+        
+        # Use length threshold as additional criterion
+        if 'length_m' in self.stream_network.columns:
+            length_mask = self.stream_network['length_m'] >= self.config.min_main_river_length_m
+            added_by_length = length_mask & ~main_river_mask
+            main_river_mask |= length_mask
+            logger.info(f"Marked {added_by_length.sum()} long streams (length >= {self.config.min_main_river_length_m}m)")
+        
+        if not main_river_mask.any():
+            logger.warning("No main river segments identified by order or length, using top 20% longest segments")
+            # Fallback to longest 20% of streams
+            length_threshold = self.stream_network['length_m'].quantile(0.8)
+            main_river_mask = self.stream_network['length_m'] >= length_threshold
+        
+        self.stream_network['is_main_river'] = main_river_mask
+        main_river_count = main_river_mask.sum()
+        logger.info(f"Total main river segments: {main_river_count} ({main_river_count/len(self.stream_network)*100:.1f}%)")
+        
+        # Persist is_main_river flag to database
+        self._persist_main_river_to_db()
+    
+    def _persist_main_river_to_db(self):
+        """
+        Persist is_main_river flags from GeoDataFrame back to StreamNetwork models in database.
+        
+        This updates the database so the main river identification is saved for future use.
+        """
+        from .models import StreamNetwork
+        from django.db import transaction
+        
+        if 'is_main_river' not in self.stream_network.columns:
+            logger.warning("is_main_river column not found in stream network, skipping database update")
+            return
+        
+        if not hasattr(self, 'raster_layer_id') or self.raster_layer_id is None:
+            logger.warning("No raster_layer_id set, cannot persist is_main_river to database")
+            return
+        
+        logger.info("Persisting is_main_river flags to database...")
+        
+        try:
+            with transaction.atomic():
+                # Get all streams for this raster layer
+                streams_qs = StreamNetwork.objects.filter(raster_layer_id=self.raster_layer_id)
+                
+                # Build lookup dict from GeoDataFrame
+                is_main_river_lookup = {}
+                for idx, row in self.stream_network.iterrows():
+                    # Use from_node and to_node to match streams
+                    from_node = row.get('from_node')
+                    to_node = row.get('to_node')
+                    is_main = row.get('is_main_river', False)
+                    if from_node is not None and to_node is not None:
+                        key = (from_node, to_node)
+                        is_main_river_lookup[key] = is_main
+                
+                # Update database models
+                updated_count = 0
+                for stream in streams_qs:
+                    key = (stream.from_node, stream.to_node)
+                    if key in is_main_river_lookup:
+                        new_value = is_main_river_lookup[key]
+                        if stream.is_main_river != new_value:
+                            stream.is_main_river = new_value
+                            stream.save(update_fields=['is_main_river'])
+                            updated_count += 1
+                
+                logger.info(f"Updated {updated_count} StreamNetwork records in database")
+                
+        except Exception as e:
+            logger.error(f"Failed to persist is_main_river to database: {e}")
+    
     def _calculate_stream_order_if_missing(self):
         """Calculate Strahler stream order if not present in data"""
-        if 'stream_order' in self.stream_network.columns and self.stream_network['stream_order'].notna().all():
-            logger.info("Stream order already present in data")
-            return
+        if 'stream_order' in self.stream_network.columns:
+            non_null_count = self.stream_network['stream_order'].notna().sum()
+            total_count = len(self.stream_network)
+            if non_null_count > 0:
+                logger.info(f"Stream order already present in data ({non_null_count}/{total_count} segments)")
+                return
         
         logger.info("Calculating Strahler stream order...")
         
@@ -601,6 +910,12 @@ class InletOutletPairing:
             for idx, stream in stream_sample.iterrows():
                 # If stream_order exists, filter by min_stream_order; otherwise accept all
                 stream_order = stream.get('stream_order', None) if has_stream_order else None
+                
+                # Filter by main_river_only if enabled
+                if self.config.main_river_only and 'is_main_river' in stream:
+                    if not stream.get('is_main_river', False):
+                        continue
+                
                 if stream_order is None or stream_order >= self.config.min_stream_order:
                     # Get last point of LineString (downstream end)
                     coords = list(stream.geometry.coords)
@@ -650,6 +965,123 @@ class InletOutletPairing:
             
             logger.info(f"Identified {len(outlet_nodes)} outlet candidates")
             return outlet_nodes
+    
+    def create_densified_nodes(self) -> gpd.GeoDataFrame:
+        """
+        Create densified nodes along stream network at regular spacing.
+        
+        This mirrors the reference QGIS code approach of placing nodes every
+        NODE_SPACING_M meters along each channel segment, with chainage tracking.
+        
+        Returns:
+            GeoDataFrame with columns: [node_id, seg_id, chainage, geometry, elevation, discharge]
+        """
+        if not self.config.use_node_densification:
+            logger.info("Node densification disabled, using original candidate methods")
+            return None
+        
+        logger.info(f"Creating densified nodes at {self.config.node_spacing}m spacing...")
+        
+        all_nodes = []
+        node_id = 1
+        
+        # Sample streams if too many
+        stream_sample = self.stream_network
+        if len(stream_sample) > self.config.max_stream_segments:
+            logger.warning(
+                f"Sampling {self.config.max_stream_segments} streams "
+                f"from {len(stream_sample)} total"
+            )
+            stream_sample = stream_sample.sample(
+                n=self.config.max_stream_segments, 
+                random_state=42
+            )
+        
+        for seg_idx, stream in stream_sample.iterrows():
+            geom = stream.geometry
+            if geom is None or geom.is_empty:
+                continue
+            
+            seg_length = geom.length
+            if seg_length <= 0:
+                continue
+            
+            # Create nodes at regular intervals
+            chainage = 0.0
+            nodes_on_segment = []
+            
+            while chainage <= seg_length:
+                # Interpolate point at chainage
+                pt_geom = geom.interpolate(chainage)
+                if pt_geom.is_empty:
+                    chainage += self.config.node_spacing
+                    continue
+                
+                pt = Point(pt_geom.coords[0])
+                
+                # Check watershed boundary
+                if not self._is_within_watershed(pt):
+                    chainage += self.config.node_spacing
+                    continue
+                
+                # Extract elevation
+                elevation = self.extract_elevation(pt.x, pt.y)
+                if elevation is None:
+                    chainage += self.config.node_spacing
+                    continue
+                
+                # Compute discharge at this node
+                discharge = self.compute_discharge_at_point(pt)
+                
+                node_data = {
+                    'node_id': node_id,
+                    'seg_id': int(seg_idx),
+                    'chainage': chainage,
+                    'geometry': pt,
+                    'elevation': elevation,
+                    'discharge': discharge,
+                    'x': pt.x,
+                    'y': pt.y
+                }
+                
+                nodes_on_segment.append(node_data)
+                all_nodes.append(node_data)
+                node_id += 1
+                
+                chainage += self.config.node_spacing
+            
+            # Ensure node at downstream end
+            if nodes_on_segment:
+                last_chainage = nodes_on_segment[-1]['chainage']
+                if abs(last_chainage - seg_length) > 0.01:  # More than 1cm difference
+                    # Add final node at segment end
+                    pt_geom = geom.interpolate(seg_length)
+                    if not pt_geom.is_empty:
+                        pt = Point(pt_geom.coords[0])
+                        elevation = self.extract_elevation(pt.x, pt.y)
+                        if elevation is not None and self._is_within_watershed(pt):
+                            discharge = self.compute_discharge_at_point(pt)
+                            node_data = {
+                                'node_id': node_id,
+                                'seg_id': int(seg_idx),
+                                'chainage': seg_length,
+                                'geometry': pt,
+                                'elevation': elevation,
+                                'discharge': discharge,
+                                'x': pt.x,
+                                'y': pt.y
+                            }
+                            all_nodes.append(node_data)
+                            node_id += 1
+        
+        if not all_nodes:
+            logger.warning("No nodes created during densification")
+            return None
+        
+        nodes_gdf = gpd.GeoDataFrame(all_nodes, crs=self.stream_network.crs)
+        logger.info(f"Created {len(nodes_gdf)} densified nodes on {len(stream_sample)} stream segments")
+        
+        return nodes_gdf
     
     def calculate_river_distance(self, inlet: Point, outlet: Point) -> float:
         """
@@ -1260,6 +1692,263 @@ class InletOutletPairing:
         logger.info(f"Deduplicated {len(pairs)} pairs to {len(selected_pairs)} unique pairs")
         return selected_pairs
     
+    def systematic_io_pairing(self, densified_nodes: gpd.GeoDataFrame) -> List[Dict]:
+        """
+        Perform systematic inlet-outlet pairing using densified nodes.
+        
+        This implements the reference QGIS algorithm:
+        1. Group nodes by stream segment
+        2. For each segment, nest loop through nodes (inlet i, outlet j where j > i)
+        3. Check three conditions:
+           a) outlet elevation < inlet elevation (positive head)
+           b) along-river distance (outlet.chainage - inlet.chainage) within bounds
+           c) head >= minimum head threshold
+        4. For each valid pair, compute pair-specific discharge and power
+        5. Deduplicate by (inlet_node, outlet_node), keeping best P_kW
+        6. Rank by power output
+        
+        Args:
+            densified_nodes: GeoDataFrame from create_densified_nodes()
+        
+        Returns:
+            List of valid IO pairs with metadata
+        """
+        if densified_nodes is None or len(densified_nodes) == 0:
+            logger.warning("No densified nodes provided for systematic pairing")
+            return []
+        
+        logger.info("Starting systematic IO pairing with densified nodes...")
+        
+        # Adaptive constraints based on stream characteristics
+        # Check if we have very short streams that need relaxed constraints
+        if 'length_m' in self.stream_network.columns:
+            median_length = self.stream_network['length_m'].median()
+            if median_length < 50:
+                logger.warning(f"Short streams detected (median length: {median_length:.1f}m)")
+                logger.warning(f"Relaxing min_river_distance from {self.config.min_river_distance}m to {max(10, median_length * 0.3):.1f}m")
+                adaptive_min_distance = max(10, median_length * 0.3)
+            else:
+                adaptive_min_distance = self.config.min_river_distance
+        else:
+            adaptive_min_distance = self.config.min_river_distance
+        
+        # Group nodes by segment
+        segments = densified_nodes.groupby('seg_id')
+        
+        all_pairs = []
+        pair_id_counter = 1
+        
+        # Count segments with multiple nodes
+        multi_node_segments = sum(1 for _, nodes in segments if len(nodes) >= 2)
+        logger.info(f"Found {len(segments)} segments, {multi_node_segments} with 2+ nodes")
+        
+        # Strategy: If most segments have <2 nodes, pair across all nodes globally
+        # Otherwise, pair within segments
+        if multi_node_segments < len(segments) * 0.1:  # Less than 10% have multiple nodes
+            logger.info("Most segments have single nodes - pairing across all nodes globally")
+            
+            # Sort all nodes by elevation (highest first = upstream)
+            all_nodes_sorted = densified_nodes.sort_values('elevation', ascending=False).reset_index(drop=True)
+            n_total = len(all_nodes_sorted)
+            
+            logger.info(f"Pairing {n_total} nodes globally...")
+            
+            # Nested loop: inlet i (higher elevation), outlet j (lower elevation)
+            for i in range(n_total - 1):
+                inlet_node = all_nodes_sorted.iloc[i]
+                inlet_pt = inlet_node.geometry
+                inlet_z = inlet_node['elevation']
+                inlet_discharge = inlet_node['discharge']
+                
+                # Only check nearby outlets to avoid O(n²) explosion
+                max_outlets_to_check = min(50, n_total - i - 1)
+                
+                for j in range(i + 1, i + 1 + max_outlets_to_check):
+                    outlet_node = all_nodes_sorted.iloc[j]
+                    outlet_pt = outlet_node.geometry
+                    outlet_z = outlet_node['elevation']
+                    outlet_discharge = outlet_node['discharge']
+                    
+                    # Condition 1: Positive head
+                    head = inlet_z - outlet_z
+                    if head <= 0:
+                        continue
+                    
+                    # Condition 2: Euclidean distance (no chainage across segments)
+                    euclidean_distance = inlet_pt.distance(outlet_pt)
+                    river_distance = euclidean_distance * 1.3  # Sinuosity estimate
+                    
+                    if river_distance < adaptive_min_distance:
+                        continue
+                    
+                    if river_distance > self.config.max_river_distance:
+                        continue
+                    
+                    # Condition 3: Minimum head
+                    if head < self.config.min_head:
+                        continue
+                    
+                    # Compute pair-specific discharge
+                    pair_discharge = min(inlet_discharge, outlet_discharge)
+                    
+                    # Calculate power
+                    power_kw = (
+                        self.config.rho * self.config.g * 
+                        pair_discharge * head * self.config.efficiency
+                    ) / 1000.0
+                    
+                    # Calculate score
+                    score = self.calculate_score(
+                        head, pair_discharge, river_distance, inlet_pt
+                    )
+                    
+                    # Apply all other constraints
+                    is_feasible, constraints = self.apply_constraints(
+                        head, river_distance, inlet_pt, outlet_pt
+                    )
+                    
+                    if not is_feasible:
+                        continue
+                    
+                    # Create pair record
+                    pair = {
+                        'pair_id': pair_id_counter,
+                        'inlet_node_id': int(inlet_node['node_id']),
+                        'outlet_node_id': int(outlet_node['node_id']),
+                        'seg_id': int(inlet_node['seg_id']),  # Inlet segment
+                        'inlet_geom': inlet_pt,
+                        'outlet_geom': outlet_pt,
+                        'inlet_elevation': inlet_z,
+                        'outlet_elevation': outlet_z,
+                        'head': head,
+                        'river_distance': river_distance,
+                        'euclidean_distance': euclidean_distance,
+                        'discharge': pair_discharge,
+                        'power_kw': power_kw,
+                        'score': score,
+                        'is_feasible': is_feasible,
+                        **constraints
+                    }
+                    
+                    all_pairs.append(pair)
+                    pair_id_counter += 1
+        else:
+            # Original within-segment pairing for longer segments
+            logger.info("Segments have multiple nodes - pairing within segments")
+            
+            for seg_id, nodes_group in segments:
+                # Sort nodes by chainage (upstream to downstream)
+                nodes_sorted = nodes_group.sort_values('chainage').reset_index(drop=True)
+                n = len(nodes_sorted)
+                
+                if n < 2:
+                    continue
+                
+                logger.debug(f"Segment {seg_id}: {n} nodes, pairing...")
+                
+                # Nested loop: inlet i, outlet j (where j > i)
+                for i in range(n - 1):
+                    inlet_node = nodes_sorted.iloc[i]
+                    inlet_pt = inlet_node.geometry
+                    inlet_z = inlet_node['elevation']
+                    inlet_chainage = inlet_node['chainage']
+                    inlet_discharge = inlet_node['discharge']
+                    
+                    for j in range(i + 1, n):
+                        outlet_node = nodes_sorted.iloc[j]
+                        outlet_pt = outlet_node.geometry
+                        outlet_z = outlet_node['elevation']
+                        outlet_chainage = outlet_node['chainage']
+                        outlet_discharge = outlet_node['discharge']
+                        
+                        # Condition 1: Positive head (outlet lower than inlet)
+                        head = inlet_z - outlet_z
+                        if head <= 0:
+                            continue
+                        
+                        # Condition 2: Along-river distance via chainage
+                        river_distance = outlet_chainage - inlet_chainage
+                        if river_distance <= 0:
+                            continue
+                        
+                        # Check distance bounds (use adaptive minimum)
+                        if river_distance < adaptive_min_distance:
+                            continue
+                        
+                        if river_distance > self.config.max_river_distance:
+                            break  # No point checking further outlets (too far)
+                        
+                        # Condition 3: Minimum head threshold
+                        if head < self.config.min_head:
+                            continue
+                        
+                        # Compute pair-specific discharge
+                        pair_discharge = min(inlet_discharge, outlet_discharge)
+                        
+                        # Calculate power: P = ρ × g × Q × H × η (in kW)
+                        power_kw = (
+                            self.config.rho * self.config.g * 
+                            pair_discharge * head * self.config.efficiency
+                        ) / 1000.0
+                        
+                        # Euclidean distance
+                        euclidean_distance = inlet_pt.distance(outlet_pt)
+                        
+                        # Calculate score
+                        score = self.calculate_score(
+                            head, pair_discharge, river_distance, inlet_pt
+                        )
+                        
+                        # Apply all other constraints
+                        is_feasible, constraints = self.apply_constraints(
+                            head, river_distance, inlet_pt, outlet_pt
+                        )
+                        
+                        if not is_feasible:
+                            continue
+                        
+                        # Create pair record
+                        pair = {
+                            'pair_id': pair_id_counter,
+                            'inlet_node_id': int(inlet_node['node_id']),
+                            'outlet_node_id': int(outlet_node['node_id']),
+                            'seg_id': int(seg_id),
+                            'inlet_geom': inlet_pt,
+                            'outlet_geom': outlet_pt,
+                            'inlet_elevation': inlet_z,
+                            'outlet_elevation': outlet_z,
+                            'head': head,
+                            'river_distance': river_distance,
+                            'euclidean_distance': euclidean_distance,
+                            'discharge': pair_discharge,
+                            'power_kw': power_kw,
+                            'score': score,
+                            'is_feasible': is_feasible,
+                            **constraints
+                        }
+                        
+                        all_pairs.append(pair)
+                        pair_id_counter += 1
+        
+        logger.info(f"Systematic pairing found {len(all_pairs)} raw IO pairs")
+        
+        # Deduplicate by (inlet_node_id, outlet_node_id): keep best power
+        unique_pairs = {}
+        for pair in all_pairs:
+            key = (pair['inlet_node_id'], pair['outlet_node_id'])
+            if key not in unique_pairs or pair['power_kw'] > unique_pairs[key]['power_kw']:
+                unique_pairs[key] = pair
+        
+        dedup_pairs = list(unique_pairs.values())
+        logger.info(f"After deduplication: {len(dedup_pairs)} unique IO pairs")
+        
+        # Sort by power (descending) and assign rank
+        dedup_pairs.sort(key=lambda p: p['power_kw'], reverse=True)
+        for rank, pair in enumerate(dedup_pairs, start=1):
+            pair['rank'] = rank
+        
+        return dedup_pairs
+    
     def run_pairing(self) -> List[Dict]:
         """
         Execute the complete inlet-outlet pairing algorithm.
@@ -1268,6 +1957,42 @@ class InletOutletPairing:
             List of feasible, scored, and deduplicated site pairs
         """
         logger.info("Starting inlet-outlet pairing algorithm")
+        
+        # Check if systematic pairing is suitable for this network
+        # Disable it for networks with very short stream segments
+        use_systematic = self.config.use_node_densification
+        if use_systematic and 'length_m' in self.stream_network.columns:
+            median_length = self.stream_network['length_m'].median()
+            if median_length < 50.0:
+                logger.warning(f"Stream network has very short segments (median: {median_length:.1f}m)")
+                logger.warning("Systematic pairing is not suitable - using original endpoint-based method")
+                use_systematic = False
+        
+        # Check if systematic pairing with node densification is enabled
+        if use_systematic:
+            logger.info("Using systematic IO pairing with densified nodes")
+            
+            # Create densified nodes
+            densified_nodes = self.create_densified_nodes()
+            
+            if densified_nodes is None or len(densified_nodes) == 0:
+                logger.warning("Node densification failed, falling back to original method")
+                # Fall through to original method below
+            else:
+                # Perform systematic pairing
+                pairs = self.systematic_io_pairing(densified_nodes)
+                
+                # Additional deduplication by spatial proximity (optional)
+                if len(pairs) > 0:
+                    final_pairs = self.deduplicate_pairs(pairs)
+                    logger.info(f"Final result: {len(final_pairs)} unique site pairs (after spatial dedup)")
+                    return final_pairs
+                else:
+                    logger.warning("Systematic pairing produced no results, falling back to original method")
+                    # Fall through to original method
+        
+        # Original pairing method (fallback or when densification disabled)
+        logger.info("Using original pairing method (endpoint-based)")
         
         # Step 1: Identify inlet candidates
         inlets = self.identify_inlet_candidates()
@@ -1392,26 +2117,31 @@ class InletOutletPairing:
             
             # Calculate power with head losses if discharge available
             if pair.get('discharge'):
-                # Calculate head losses
-                penstock_length = pair.get('euclidean_distance', pair['river_distance'] * 0.3)
-                head_loss_data = self.calculate_head_losses(
-                    gross_head=pair['head'],
-                    penstock_length=penstock_length,
-                    discharge=pair['discharge'],
-                    num_bends=2
-                )
-                
-                # Calculate power using net head (after losses)
-                net_head = head_loss_data['net_head']
-                power_watts = self.config.rho * self.config.g * pair['discharge'] * net_head * self.config.efficiency
-                site_pair.power = power_watts / 1000.0  # Convert to kW
-                
-                # Store head loss information in metadata
-                site_pair.meets_head_constraint = net_head >= self.config.min_head
-                
-                logger.debug(f"{pair['pair_id']}: Gross head={pair['head']:.1f}m, Net head={net_head:.1f}m, "
-                           f"Head loss={head_loss_data['total_head_loss']:.1f}m ({head_loss_data['efficiency_factor']*100:.1f}%), "
-                           f"Power={site_pair.power:.1f}kW")
+                # Use pre-calculated power if available (from systematic_io_pairing)
+                if pair.get('power_kw'):
+                    site_pair.power = pair['power_kw']
+                    logger.debug(f"{pair_id}: Using pre-calculated power={site_pair.power:.1f}kW")
+                else:
+                    # Calculate head losses
+                    penstock_length = pair.get('euclidean_distance', pair['river_distance'] * 0.3)
+                    head_loss_data = self.calculate_head_losses(
+                        gross_head=pair['head'],
+                        penstock_length=penstock_length,
+                        discharge=pair['discharge'],
+                        num_bends=2
+                    )
+                    
+                    # Calculate power using net head (after losses)
+                    net_head = head_loss_data['net_head']
+                    power_watts = self.config.rho * self.config.g * pair['discharge'] * net_head * self.config.efficiency
+                    site_pair.power = power_watts / 1000.0  # Convert to kW
+                    
+                    # Store head loss information in metadata
+                    site_pair.meets_head_constraint = net_head >= self.config.min_head
+                    
+                    logger.debug(f"{pair_id}: Gross head={pair['head']:.1f}m, Net head={net_head:.1f}m, "
+                               f"Head loss={head_loss_data['total_head_loss']:.1f}m ({head_loss_data['efficiency_factor']*100:.1f}%), "
+                               f"Power={site_pair.power:.1f}kW")
                 
                 site_pair.save()
             
